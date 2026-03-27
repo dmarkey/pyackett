@@ -400,6 +400,11 @@ _MINIMAL_UI = """<!DOCTYPE html>
         .card { border: none; box-shadow: 0 1px 3px rgba(0,0,0,.1); }
         .result-row:hover { background: #e9ecef; }
         #results-table { font-size: 0.85em; }
+        .sortable { cursor: pointer; user-select: none; white-space: nowrap; }
+        .sortable:hover { background: #dee2e6; }
+        .sort-arrow { font-size: 0.7em; opacity: 0.4; }
+        .sort-arrow.asc::after { content: ' \\25B2'; opacity: 1; }
+        .sort-arrow.desc::after { content: ' \\25BC'; opacity: 1; }
         .badge-public { background: #198754; }
         .badge-private { background: #dc3545; }
         .badge-semi-private { background: #fd7e14; }
@@ -454,7 +459,13 @@ _MINIMAL_UI = """<!DOCTYPE html>
             <div style="max-height:500px; overflow-y:auto;">
                 <table class="table table-sm table-striped mb-0" id="results-table">
                     <thead class="table-light"><tr>
-                        <th>Tracker</th><th>Title</th><th>Size</th><th>S</th><th>P</th><th>Date</th><th></th>
+                        <th>Tracker</th>
+                        <th class="sortable" data-sort="Title">Title <span class="sort-arrow"></span></th>
+                        <th class="sortable" data-sort="Size">Size <span class="sort-arrow"></span></th>
+                        <th class="sortable" data-sort="Seeders">S <span class="sort-arrow"></span></th>
+                        <th class="sortable" data-sort="Peers">P <span class="sort-arrow"></span></th>
+                        <th class="sortable" data-sort="PublishDate">Date <span class="sort-arrow"></span></th>
+                        <th></th>
                     </tr></thead>
                     <tbody id="results-body"></tbody>
                 </table>
@@ -784,7 +795,67 @@ document.getElementById('config-save-btn').addEventListener('click', async () =>
     }
 });
 
-// ---- Search ----
+// ---- Search + Sorting ----
+let searchResults = [];
+let sortField = null;
+let sortDir = 'desc';
+
+function renderResults() {
+    let items = [...searchResults];
+    if (sortField) {
+        items.sort((a, b) => {
+            let va = a[sortField], vb = b[sortField];
+            if (sortField === 'PublishDate') {
+                va = va ? new Date(va).getTime() : 0;
+                vb = vb ? new Date(vb).getTime() : 0;
+            }
+            if (sortField === 'Title') {
+                va = (va || '').toLowerCase();
+                vb = (vb || '').toLowerCase();
+            }
+            va = va ?? -1; vb = vb ?? -1;
+            if (va < vb) return sortDir === 'asc' ? -1 : 1;
+            if (va > vb) return sortDir === 'asc' ? 1 : -1;
+            return 0;
+        });
+    }
+    const body = document.getElementById('results-body');
+    body.innerHTML = '';
+    items.forEach(r => {
+        const date = r.PublishDate ? new Date(r.PublishDate).toLocaleDateString() : '-';
+        const dl = r.Link || r.MagnetUri || '#';
+        const fl = r.DownloadVolumeFactor === 0 ? '<span class="badge bg-success">FL</span>' : '';
+        body.innerHTML += `<tr class="result-row">
+            <td>${r.Tracker || '-'}</td>
+            <td><a href="${r.Details || '#'}" target="_blank">${r.Title}</a> ${fl}</td>
+            <td data-sort="${r.Size||0}">${formatSize(r.Size)}</td>
+            <td class="text-success">${r.Seeders ?? '-'}</td>
+            <td class="text-danger">${r.Peers ?? '-'}</td>
+            <td>${date}</td>
+            <td><a href="${dl}" class="btn btn-sm btn-outline-primary py-0">DL</a></td>
+        </tr>`;
+    });
+    // Update sort arrows
+    document.querySelectorAll('.sort-arrow').forEach(el => el.className = 'sort-arrow');
+    if (sortField) {
+        const th = document.querySelector(`th[data-sort="${sortField}"] .sort-arrow`);
+        if (th) th.className = 'sort-arrow ' + sortDir;
+    }
+}
+
+document.querySelectorAll('.sortable').forEach(th => {
+    th.addEventListener('click', () => {
+        const field = th.dataset.sort;
+        if (sortField === field) {
+            sortDir = sortDir === 'desc' ? 'asc' : 'desc';
+        } else {
+            sortField = field;
+            sortDir = (field === 'Title') ? 'asc' : 'desc';
+        }
+        renderResults();
+    });
+});
+
 document.getElementById('search-btn').addEventListener('click', async () => {
     const q = document.getElementById('search-input').value;
     const idx = document.getElementById('indexer-select').value;
@@ -794,24 +865,11 @@ document.getElementById('search-btn').addEventListener('click', async () => {
     try {
         const resp = await fetch(`${API}/indexers/${idx}/results?t=search&q=${encodeURIComponent(q)}`);
         const data = await resp.json();
-        const body = document.getElementById('results-body');
-        body.innerHTML = '';
+        searchResults = data.Results || [];
         document.getElementById('results-container').style.display = '';
-        document.getElementById('result-count').textContent = (data.Results||[]).length;
-        (data.Results||[]).forEach(r => {
-            const date = r.PublishDate ? new Date(r.PublishDate).toLocaleDateString() : '-';
-            const dl = r.Link || r.MagnetUri || '#';
-            const fl = r.DownloadVolumeFactor === 0 ? '<span class="badge bg-success">FL</span>' : '';
-            body.innerHTML += `<tr class="result-row">
-                <td>${r.Tracker || '-'}</td>
-                <td><a href="${r.Details || '#'}" target="_blank">${r.Title}</a> ${fl}</td>
-                <td>${formatSize(r.Size)}</td>
-                <td class="text-success">${r.Seeders ?? '-'}</td>
-                <td class="text-danger">${r.Peers ?? '-'}</td>
-                <td>${date}</td>
-                <td><a href="${dl}" class="btn btn-sm btn-outline-primary py-0">DL</a></td>
-            </tr>`;
-        });
+        document.getElementById('result-count').textContent = searchResults.length;
+        sortField = 'Seeders'; sortDir = 'desc';
+        renderResults();
     } catch(e) { showToast('Search failed: '+e, 'danger'); }
     finally { btn.disabled = false; btn.textContent = 'Search'; }
 });
