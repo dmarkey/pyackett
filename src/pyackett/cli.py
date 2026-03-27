@@ -42,6 +42,18 @@ def main():
         default=None,
         help="Proxy URL for indexer requests (e.g. socks5://127.0.0.1:1080, http://proxy:8080)",
     )
+    parser.add_argument(
+        "--timeout",
+        type=float,
+        default=30.0,
+        help="Total request timeout in seconds (default: 30)",
+    )
+    parser.add_argument(
+        "--connect-timeout",
+        type=float,
+        default=5.0,
+        help="Connection establishment timeout in seconds (default: 5)",
+    )
     args = parser.parse_args()
 
     logging.basicConfig(
@@ -55,6 +67,8 @@ def main():
         config_dir=args.config_dir,
         definitions_dir=args.definitions_dir,
         proxy=args.proxy,
+        timeout=args.timeout,
+        connect_timeout=args.connect_timeout,
     )
 
     if args.from_github:

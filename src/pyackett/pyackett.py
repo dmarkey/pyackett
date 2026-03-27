@@ -41,12 +41,16 @@ class Pyackett:
         config_dir: str | Path | None = None,
         definitions_dir: str | Path | None = None,
         proxy: str | None = None,
+        timeout: float = 30.0,
+        connect_timeout: float = 5.0,
     ):
         """
         Args:
             config_dir: Directory for persistent config/cache.
             definitions_dir: Local directory containing YAML definitions.
             proxy: Proxy URL (socks5://host:port, http://host:port, etc.).
+            timeout: Total request timeout in seconds (default: 30).
+            connect_timeout: Connection establishment timeout in seconds (default: 5).
         """
         self._config_dir = Path(config_dir) if config_dir else Path.home() / ".config" / "pyackett"
         self._config_dir.mkdir(parents=True, exist_ok=True)
@@ -54,7 +58,7 @@ class Pyackett:
         self._proxy = proxy
 
         from pyackett.core.http import create_http_client
-        self._client = create_http_client(proxy=proxy)
+        self._client = create_http_client(proxy=proxy, timeout=timeout, connect_timeout=connect_timeout)
 
         # Load persisted CF cookies so we don't need to re-solve after restart
         self._client._cf_cache_path = self._config_dir / "cf_cookies.json"

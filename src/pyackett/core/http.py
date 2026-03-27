@@ -55,10 +55,12 @@ class HttpClient:
         self,
         proxy: str | None = None,
         timeout: float = 30.0,
+        connect_timeout: float = 5.0,
         impersonate: str = DEFAULT_IMPERSONATE,
     ):
         self._proxy = proxy
         self._timeout = timeout
+        self._connect_timeout = connect_timeout
         self._impersonate = impersonate
         self._session: AsyncSession | None = None
         self._cf_cache: dict[str, CfClearance] = {}
@@ -70,7 +72,7 @@ class HttpClient:
             self._session = AsyncSession(
                 impersonate=self._impersonate,
                 proxy=self._proxy,
-                timeout=self._timeout,
+                timeout=(self._connect_timeout, self._timeout),
                 headers=DEFAULT_HEADERS,
             )
         return self._session
@@ -90,7 +92,7 @@ class HttpClient:
                 self._ff_session = AsyncSession(
                     impersonate="firefox",
                     proxy=self._proxy,
-                    timeout=self._timeout,
+                    timeout=(self._connect_timeout, self._timeout),
                     headers=DEFAULT_HEADERS,
                 )
                 # Copy cookies
@@ -500,14 +502,20 @@ async def _start_http_proxy_over_socks(upstream_socks: str) -> dict | None:
 def create_http_client(
     proxy: str | None = None,
     timeout: float = 30.0,
+    connect_timeout: float = 5.0,
 ) -> HttpClient:
     """Create an HttpClient with optional proxy support.
 
     Supports SOCKS5, SOCKS4, HTTP proxies natively via curl_cffi.
     For SOCKS5 proxies, remote DNS resolution is used by default
     (socks5h://) to avoid local DNS leaks.
+
+    Args:
+        proxy: Proxy URL string, or None for direct connection.
+        timeout: Total request timeout in seconds.
+        connect_timeout: TCP connection establishment timeout in seconds.
     """
     # curl_cffi needs socks5h:// for remote DNS resolution
     if proxy and proxy.startswith("socks5://"):
         proxy = "socks5h://" + proxy[len("socks5://"):]
-    return HttpClient(proxy=proxy, timeout=timeout)
+    return HttpClient(proxy=proxy, timeout=timeout, connect_timeout=connect_timeout)
