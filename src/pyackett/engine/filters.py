@@ -33,6 +33,8 @@ _UNICODE_PROPERTY_MAP = {
     r"\p{Nd}": r"0-9",
     r"\p{Lu}": r"A-Z\u00C0-\u00D6\u00D8-\u00DE\u0400-\u042F",
     r"\p{Ll}": r"a-z\u00E0-\u00F6\u00F8-\u00FF\u0430-\u044F",
+    r"\p{IsCJKUnifiedIdeographs}": r"\u4E00-\u9FFF",
+    r"\p{CJKUnifiedIdeographs}": r"\u4E00-\u9FFF",
 }
 
 
@@ -41,10 +43,11 @@ def _fix_unicode_properties(pattern: str) -> str:
     if r"\p{" not in pattern:
         return pattern
     for prop, replacement in _UNICODE_PROPERTY_MAP.items():
-        # Handle both inside and outside character classes
-        # Inside [...]: \p{X} -> replacement chars
-        # Outside [...]: \p{X} -> [replacement]
         pattern = pattern.replace(prop, replacement)
+    # Catch any remaining unknown \p{...} — replace with a broad match rather than crash
+    if r"\p{" in pattern:
+        import re as _re
+        pattern = _re.sub(r'\\p\{[^}]+\}', r'\\w', pattern)
     return pattern
 
 
@@ -159,8 +162,11 @@ def apply_filters(
 
             case "regexp":
                 pattern = _fix_unicode_properties(str(args))
-                m = re.search(pattern, data)
-                data = m.group(1) if m and m.lastindex else ""
+                try:
+                    m = re.search(pattern, data)
+                    data = m.group(1) if m and m.lastindex else ""
+                except re.error:
+                    pass
 
             case "re_replace":
                 pattern = _fix_unicode_properties(str(args[0]))
@@ -168,7 +174,10 @@ def apply_filters(
                 replacement = apply_template(replacement, variables)
                 # Convert C#/Go-style $1 backreferences to Python \1
                 replacement = re.sub(r'\$(\d+)', r'\\\1', replacement)
-                data = re.sub(pattern, replacement, data)
+                try:
+                    data = re.sub(pattern, replacement, data)
+                except re.error:
+                    pass  # skip broken regex rather than crash
 
             case "split":
                 sep = str(args[0])
