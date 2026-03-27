@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import base64
 import json
 import logging
 import secrets
@@ -89,6 +90,12 @@ def create_app(
         else:
             return await _handle_search(indexer_id, params, request)
 
+    def _rewrite_download_links(results, request: Request):
+        """Rewrite HTTP download links to go through our proxy endpoint."""
+        for r in results:
+            if r.link and not r.link.startswith("magnet:"):
+                r.link = _proxy_link(request, r.link)
+
     async def _handle_search(indexer_id: str, params: dict, request: Request) -> Response:
         indexer = manager.get_indexer(indexer_id)
         if not indexer:
@@ -126,6 +133,7 @@ def create_app(
         if query.limit > 0:
             results = results[:query.limit]
 
+        _rewrite_download_links(results, request)
         xml = results_to_xml(
             results,
             channel_title=indexer.name,
@@ -151,6 +159,7 @@ def create_app(
         if query.limit > 0:
             results = results[:query.limit]
 
+        _rewrite_download_links(results, request)
         xml = results_to_xml(
             results,
             channel_title="Pyackett",
@@ -276,6 +285,7 @@ def create_app(
                 return JSONResponse({"error": "Indexer not available"}, status_code=404)
             results = await indexer.search(query)
 
+        _rewrite_download_links(results, request)
         return {
             "Results": [
                 {
@@ -303,6 +313,58 @@ def create_app(
                 for idx in manager.configured_indexers.values()
             ],
         }
+
+    # --- Download Proxy ---
+
+    def _proxy_link(request: Request, url: str) -> str:
+        """Rewrite a download URL to go through our proxy endpoint.
+
+        Magnet URIs are returned as-is (no proxy needed).
+        HTTP(S) .torrent links are rewritten to /api/v2.0/dl?url=<base64>&apikey=<key>
+        so the server fetches them through its configured proxy.
+        """
+        if not url or url.startswith("magnet:"):
+            return url
+        encoded = base64.urlsafe_b64encode(url.encode()).decode()
+        return f"{request.base_url}api/v2.0/dl?url={encoded}&apikey={api_key}"
+
+    @app.get("/api/v2.0/dl")
+    async def proxy_download(url: str, apikey: str = ""):
+        """Proxy a .torrent download through the server's HTTP client + proxy."""
+        if apikey != api_key:
+            return Response(content="Invalid API key", status_code=403)
+
+        try:
+            decoded_url = base64.urlsafe_b64decode(url.encode()).decode()
+        except Exception:
+            return Response(content="Invalid URL", status_code=400)
+
+        # Use the manager's shared HTTP client (which has the proxy configured)
+        client = None
+        for idx in manager.all_indexers.values():
+            if idx.client:
+                client = idx.client
+                break
+
+        if not client:
+            from pyackett.core.http import create_http_client
+            client = create_http_client()
+
+        try:
+            resp = await client.get(decoded_url, cf_retry=True)
+            content_type = resp.headers.get("content-type", "application/x-bittorrent")
+            # Try to get filename from content-disposition or URL
+            filename = decoded_url.rstrip("/").split("/")[-1]
+            if not filename.endswith(".torrent"):
+                filename += ".torrent"
+            return Response(
+                content=resp.content,
+                media_type=content_type,
+                headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+            )
+        except Exception as e:
+            logger.error(f"Download proxy error: {e}")
+            return Response(content=f"Download failed: {e}", status_code=502)
 
     # --- Web UI ---
 
