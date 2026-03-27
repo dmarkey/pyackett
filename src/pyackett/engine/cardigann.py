@@ -536,6 +536,7 @@ class CardigannIndexer:
             logger.error(f"JSON parse error: {e}")
             return []
 
+        row_selector = apply_template(row_selector, variables)
         rows = extract_rows_from_json(data, row_selector)
 
         if after > 0:
