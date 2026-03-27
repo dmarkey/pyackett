@@ -198,15 +198,18 @@ class HttpClient:
         return merged
 
     def _should_try_cf(self, url: str) -> bool:
-        """Check if we should attempt CF solve for this URL.
-
-        Allows retrying if cookies exist but may have expired.
-        Only blocks if the solve itself failed (not cookies expiring).
-        """
+        """Check if we should attempt CF solve for this URL."""
         from urllib.parse import urlparse
         domain = urlparse(url).netloc
         if domain in self._cf_failed:
             return False
+        # If we have cached cookies but got 403, they're stale — clear and retry
+        if domain in self._cf_cache:
+            logger.debug(f"Clearing stale CF cookies for {domain}")
+            del self._cf_cache[domain]
+            # Also clear the Firefox session so it gets new cookies
+            if hasattr(self, '_ff_session') and self._ff_session:
+                self._ff_session = None
         return True
 
     @staticmethod
@@ -275,13 +278,11 @@ class HttpClient:
                 geoip=True,
             ) as browser:
                 page = await browser.new_page()
-                # Navigate to the site root (not the specific URL) to solve the CF challenge.
-                # The cf_clearance cookie is domain-wide so it works for all paths.
-                from urllib.parse import urlparse as _up
-                site_root = f"{_up(url).scheme}://{_up(url).netloc}/"
-                logger.info(f"Navigating to {site_root} to solve CF challenge")
+                # Navigate to the actual URL to solve CF for that specific path.
+                # Some sites have different CF security per path.
+                logger.info(f"Navigating to {url} to solve CF challenge")
                 try:
-                    await page.goto(site_root, wait_until="domcontentloaded", timeout=45000)
+                    await page.goto(url, wait_until="domcontentloaded", timeout=45000)
                 except Exception as nav_err:
                     logger.error(f"Navigation failed: {nav_err}")
                     return False
