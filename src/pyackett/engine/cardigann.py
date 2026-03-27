@@ -252,6 +252,11 @@ class CardigannIndexer:
             cookie_str = "; ".join(f"{k}={v}" for k, v in self.cookies.items())
             req_headers.setdefault("Cookie", cookie_str)
 
+        # Use configured user-agent if set
+        ua = self.config.get("useragent") or self.config.get("user-agent")
+        if ua:
+            req_headers.setdefault("User-Agent", ua)
+
         # Add search headers from definition
         search_headers = self.definition.search.get("headers", {})
         for key, values in search_headers.items():
@@ -318,11 +323,23 @@ class CardigannIndexer:
             elif method == "header":
                 resp = await self._request(path, method="GET", headers=req_headers)
             elif method == "cookie":
-                # Cookie auth - cookies are provided directly in config
+                # Cookie auth — either via named cookies or a full cookie string
                 cookie_names = login_block.get("cookies", [])
-                for name in cookie_names:
-                    if name in self.config:
-                        self.cookies[name] = self.config[name]
+                if cookie_names:
+                    for name in cookie_names:
+                        if name in self.config:
+                            self.cookies[name] = self.config[name]
+                # Also check inputs for a full cookie string
+                login_inputs = login_block.get("inputs", {})
+                for key, value in login_inputs.items():
+                    expanded = apply_template(str(value), variables)
+                    if expanded:
+                        # Parse "uid=123; pass=abc" into individual cookies
+                        for part in expanded.split(";"):
+                            part = part.strip()
+                            if "=" in part:
+                                k, v = part.split("=", 1)
+                                self.cookies[k.strip()] = v.strip()
                 # Test the login
                 test = login_block.get("test", {})
                 test_path = test.get("path", "")
