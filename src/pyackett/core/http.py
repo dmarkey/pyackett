@@ -10,8 +10,10 @@ challenge solver can be used to obtain cf_clearance cookies.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 
 from curl_cffi.requests import AsyncSession, Response
@@ -34,6 +36,13 @@ class CfClearance:
     cookies: dict[str, str] = field(default_factory=dict)
     user_agent: str = ""
 
+    def to_dict(self) -> dict:
+        return {"cookies": self.cookies, "user_agent": self.user_agent}
+
+    @classmethod
+    def from_dict(cls, data: dict) -> "CfClearance":
+        return cls(cookies=data.get("cookies", {}), user_agent=data.get("user_agent", ""))
+
 
 class HttpClient:
     """Async HTTP client with browser TLS fingerprinting and CF bypass.
@@ -54,6 +63,7 @@ class HttpClient:
         self._session: AsyncSession | None = None
         self._cf_cache: dict[str, CfClearance] = {}
         self._cf_failed: set[str] = set()  # domains where CF solve failed this session
+        self._cf_cache_path: Path | None = None  # set by Pyackett to enable persistence
 
     async def _ensure_session(self) -> AsyncSession:
         if self._session is None:
@@ -329,6 +339,8 @@ class HttpClient:
                                 f"({len(cf_cookies)} cookies, "
                                 f"cf_clearance={'cf_clearance' in cf_cookies})"
                             )
+                            if self._cf_cache_path:
+                                self.save_cf_cache(self._cf_cache_path)
                             return True
 
                 logger.warning(f"Cloudflare challenge timed out for {domain}")
@@ -344,6 +356,29 @@ class HttpClient:
                     await local_forwarder["server"].wait_closed()
                 except Exception:
                     pass
+
+    def save_cf_cache(self, path: "Path"):
+        """Persist CF clearance cookies to disk for reuse after restart."""
+        from pathlib import Path
+        data = {domain: cf.to_dict() for domain, cf in self._cf_cache.items()}
+        if data:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(json.dumps(data, indent=2))
+            logger.debug(f"Saved CF cookies for {len(data)} domains")
+
+    def load_cf_cache(self, path: "Path"):
+        """Load previously saved CF clearance cookies."""
+        from pathlib import Path
+        if not path.exists():
+            return
+        try:
+            data = json.loads(path.read_text())
+            for domain, cf_data in data.items():
+                self._cf_cache[domain] = CfClearance.from_dict(cf_data)
+            if data:
+                logger.info(f"Loaded CF cookies for {len(data)} domains")
+        except Exception as e:
+            logger.warning(f"Failed to load CF cache: {e}")
 
     async def close(self):
         """Close all sessions."""

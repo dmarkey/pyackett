@@ -49,11 +49,16 @@ class Pyackett:
             proxy: Proxy URL (socks5://host:port, http://host:port, etc.).
         """
         self._config_dir = Path(config_dir) if config_dir else Path.home() / ".config" / "pyackett"
+        self._config_dir.mkdir(parents=True, exist_ok=True)
         self._definitions_dir = Path(definitions_dir) if definitions_dir else None
         self._proxy = proxy
 
         from pyackett.core.http import create_http_client
         self._client = create_http_client(proxy=proxy)
+
+        # Load persisted CF cookies so we don't need to re-solve after restart
+        self._client._cf_cache_path = self._config_dir / "cf_cookies.json"
+        self._client.load_cf_cache(self._client._cf_cache_path)
 
         self._manager = IndexerManager(
             definitions_dir=self._definitions_dir,
@@ -196,7 +201,9 @@ class Pyackett:
         )
 
     async def close(self):
-        """Close the HTTP client."""
+        """Close the HTTP client and save state."""
+        if self._client._cf_cache_path:
+            self._client.save_cf_cache(self._client._cf_cache_path)
         await self._client.close()
 
     async def __aenter__(self):

@@ -46,16 +46,19 @@ def create_app(
 
     # Load or generate API key
     server_config_path = config_dir / "server_config.json"
+    saved_cfg = {}
+    if server_config_path.exists():
+        try:
+            saved_cfg = json.loads(server_config_path.read_text())
+        except Exception:
+            pass
     if api_key is None:
-        if server_config_path.exists():
-            try:
-                cfg = json.loads(server_config_path.read_text())
-                api_key = cfg.get("api_key", "")
-            except Exception:
-                pass
-        if not api_key:
-            api_key = secrets.token_hex(16)
-            server_config_path.write_text(json.dumps({"api_key": api_key}, indent=2))
+        api_key = saved_cfg.get("api_key", "")
+    if not api_key:
+        api_key = secrets.token_hex(16)
+    # Persist
+    saved_cfg["api_key"] = api_key
+    server_config_path.write_text(json.dumps(saved_cfg, indent=2))
 
     cache = ResultCache()
 
