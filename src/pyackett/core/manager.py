@@ -61,7 +61,7 @@ class IndexerManager:
         self._definitions = load_all_definitions(directory)
         logger.info(f"Loaded {len(self._definitions)} indexer definitions")
 
-        # Create indexer instances for all definitions
+        # Create indexer instances for all YAML definitions
         for defn_id, defn in self._definitions.items():
             if defn_id not in self._indexers:
                 saved_config = self._load_indexer_config(defn_id)
@@ -72,6 +72,9 @@ class IndexerManager:
                 )
                 if saved_config:
                     self._indexers[defn_id].is_configured = True
+
+        # Register native Python indexers
+        self._load_native_indexers()
 
     def get_indexer(self, indexer_id: str) -> CardigannIndexer | None:
         """Get an indexer by ID."""
@@ -150,6 +153,21 @@ class IndexerManager:
 
         return all_results
 
+    def _load_native_indexers(self):
+        """Register native Python indexer implementations."""
+        from pyackett.indexers.iptorrents import IPTorrents
+
+        for cls in [IPTorrents]:
+            if cls.id not in self._indexers:
+                saved_config = self._load_indexer_config(cls.id)
+                idx = cls(config=saved_config, client=self._client)
+                if saved_config:
+                    idx.is_configured = True
+                self._indexers[cls.id] = idx
+                # Add to definitions list for discoverability
+                if cls.id not in self._definitions:
+                    self._definitions[cls.id] = idx
+
     def _load_indexer_config(self, indexer_id: str) -> dict[str, Any] | None:
         """Load saved indexer configuration."""
         config_path = self._config_dir / "indexers" / f"{indexer_id}.json"
@@ -168,19 +186,20 @@ class IndexerManager:
         config_path.write_text(json.dumps(config, indent=2))
 
     def list_available(self) -> list[dict[str, str]]:
-        """List all available indexer definitions."""
-        return [
-            {
-                "id": defn.id,
-                "name": defn.name,
-                "description": defn.description,
-                "type": defn.type,
-                "language": defn.language,
-                "site_link": defn.site_link,
-                "configured": defn.id in self.configured_indexers,
-            }
-            for defn in self._definitions.values()
-        ]
+        """List all available indexers (YAML + native)."""
+        result = []
+        for defn in self._definitions.values():
+            result.append({
+                "id": getattr(defn, "id", ""),
+                "name": getattr(defn, "name", ""),
+                "description": getattr(defn, "description", ""),
+                "type": getattr(defn, "type", getattr(defn, "indexer_type", "")),
+                "language": getattr(defn, "language", "en-US"),
+                "site_link": getattr(defn, "site_link", ""),
+                "configured": getattr(defn, "id", "") in self.configured_indexers,
+                "settings": getattr(defn, "settings", []),
+            })
+        return result
 
     def list_configured(self) -> list[dict[str, str]]:
         """List configured indexers."""
