@@ -1,0 +1,43 @@
+[project]
+name = "pyackett"
+version = "0.1.0"
+description = "Python clean room implementation of a Torznab-compatible indexer proxy"
+readme = "README.md"
+requires-python = ">=3.12"
+license = "MIT"
+dependencies = [
+    "fastapi>=0.115.0",
+    "uvicorn[standard]>=0.32.0",
+    "curl_cffi>=0.7.0",
+    "beautifulsoup4>=4.12.0",
+    "lxml>=5.0.0",
+    "ruamel.yaml>=0.18.0",
+    "pydantic>=2.0.0",
+    "python-dateutil>=2.9.0",
+    "jsonpath-ng>=1.6.0",
+    "cachetools>=5.5.0",
+]
+
+[project.optional-dependencies]
+cloudflare = ["camoufox[geoip]>=0.4.11"]
+
+[project.scripts]
+pyackett = "pyackett.cli:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/pyackett"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+
+[dependency-groups]
+dev = [
+    "pytest>=8.0.0",
+    "pytest-asyncio>=0.24.0",
+    "camoufox[geoip]>=0.4.11",
+]
