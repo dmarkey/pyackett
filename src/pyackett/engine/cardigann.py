@@ -662,6 +662,17 @@ class CardigannIndexer:
         # Info hash
         release.info_hash = fields.get("infohash") or None
 
+        # Generate magnet URI from info_hash if no download link exists
+        if not release.link and not release.magnet_uri and release.info_hash:
+            from urllib.parse import quote
+            release.magnet_uri = (
+                f"magnet:?xt=urn:btih:{release.info_hash}"
+                f"&dn={quote(release.title)}"
+            )
+
+        if not release.guid:
+            release.guid = release.link or release.magnet_uri or title
+
         # Description
         release.description = fields.get("description") or None
 
