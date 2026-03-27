@@ -5,6 +5,15 @@ description = "Python clean room implementation of a Torznab-compatible indexer 
 readme = "README.md"
 requires-python = ">=3.12"
 license = "MIT"
+authors = [{name = "David Markey"}]
+keywords = ["torznab", "jackett", "torrent", "indexer", "proxy", "sonarr", "radarr"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Internet :: WWW/HTTP :: Indexing/Search",
+]
 dependencies = [
     "fastapi>=0.115.0",
     "uvicorn[standard]>=0.32.0",
@@ -20,6 +29,11 @@ dependencies = [
 
 [project.optional-dependencies]
 cloudflare = ["camoufox[geoip]>=0.4.11"]
+
+[project.urls]
+Homepage = "https://github.com/dmarkey/pyackett"
+Repository = "https://github.com/dmarkey/pyackett"
+Issues = "https://github.com/dmarkey/pyackett/issues"
 
 [project.scripts]
 pyackett = "pyackett.cli:main"
