@@ -212,13 +212,13 @@ def parse_torznab_query(params: dict[str, str]) -> TorznabQuery:
 
     query.query_type = params.get("t", "search")
     query.api_key = params.get("apikey", "") or params.get("passkey", "")
-    query.search_term = params.get("q")
+    query.search_term = params.get("q") or params.get("Query")  # Jackett compat
     query.extended = int(params.get("extended", "0") or "0")
     query.limit = int(params.get("limit", "100") or "100")
     query.offset = int(params.get("offset", "0") or "0")
 
-    # Categories (can be comma-separated or multiple cat[] params)
-    cat_str = params.get("cat", "")
+    # Categories (comma-separated, or Jackett-style Category[])
+    cat_str = params.get("cat", "") or params.get("Category[]", "") or params.get("Category", "")
     if cat_str:
         query.categories = [int(c) for c in cat_str.split(",") if c.strip().isdigit()]
 
