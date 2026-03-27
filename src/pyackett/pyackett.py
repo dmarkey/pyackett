@@ -100,14 +100,14 @@ class Pyackett:
             force_update: If True, re-download even if cached.
         """
         from pyackett.core.definitions_fetcher import (
-            fetch_definitions_if_missing,
+            fetch_definitions_if_needed,
             update_definitions,
         )
 
         if force_update:
             defs_dir = update_definitions(self._config_dir, source=source, branch=branch)
         else:
-            defs_dir = fetch_definitions_if_missing(self._config_dir, source=source, branch=branch)
+            defs_dir = fetch_definitions_if_needed(self._config_dir, source=source, branch=branch)
 
         self._manager.load_definitions(defs_dir)
 
