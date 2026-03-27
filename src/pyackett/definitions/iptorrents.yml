@@ -1,0 +1,209 @@
+---
+id: iptorrents
+name: IPTorrents
+description: "IPTorrents is a Private site. Always a step ahead."
+language: en-US
+type: private
+encoding: UTF-8
+links:
+  - https://iptorrents.com/
+legacylinks:
+  - https://www.iptorrents.com/
+  - https://iptorrents.me/
+  - https://ipt.cool/
+  - https://ipt.lol/
+  - https://ipt.world/
+
+caps:
+  categorymappings:
+    # Movies
+    - {id: 72, cat: Movies, desc: "Movies"}
+    - {id: 87, cat: Movies/3D, desc: "Movie/3D"}
+    - {id: 77, cat: Movies/SD, desc: "Movie/480p"}
+    - {id: 101, cat: Movies/UHD, desc: "Movie/4K"}
+    - {id: 89, cat: Movies/BluRay, desc: "Movie/BD-R"}
+    - {id: 90, cat: Movies/HD, desc: "Movie/BD-Rip"}
+    - {id: 96, cat: Movies/SD, desc: "Movie/Cam"}
+    - {id: 6, cat: Movies/DVD, desc: "Movie/DVD-R"}
+    - {id: 48, cat: Movies/HD, desc: "Movie/HD/Bluray"}
+    - {id: 54, cat: Movies, desc: "Movie/Kids"}
+    - {id: 62, cat: Movies/SD, desc: "Movie/MP4"}
+    - {id: 38, cat: Movies/Foreign, desc: "Movie/Non-English"}
+    - {id: 68, cat: Movies, desc: "Movie/Packs"}
+    - {id: 20, cat: Movies/WEB-DL, desc: "Movie/Web-DL"}
+    - {id: 100, cat: Movies/HD, desc: "Movie/x265"}
+    - {id: 7, cat: Movies/SD, desc: "Movie/Xvid"}
+    # TV
+    - {id: 73, cat: TV, desc: "TV"}
+    - {id: 26, cat: TV/Documentary, desc: "TV/Documentaries"}
+    - {id: 55, cat: TV/Sport, desc: "Sports"}
+    - {id: 78, cat: TV/SD, desc: "TV/480p"}
+    - {id: 23, cat: TV/HD, desc: "TV/BD"}
+    - {id: 24, cat: TV/SD, desc: "TV/DVD-R"}
+    - {id: 25, cat: TV/SD, desc: "TV/DVD-Rip"}
+    - {id: 66, cat: TV/SD, desc: "TV/Mobile"}
+    - {id: 82, cat: TV/Foreign, desc: "TV/Non-English"}
+    - {id: 65, cat: TV, desc: "TV/Packs"}
+    - {id: 83, cat: TV/Foreign, desc: "TV/Packs/Non-English"}
+    - {id: 79, cat: TV/SD, desc: "TV/SD/x264"}
+    - {id: 22, cat: TV/WEB-DL, desc: "TV/Web-DL"}
+    - {id: 5, cat: TV/HD, desc: "TV/x264"}
+    - {id: 99, cat: TV/HD, desc: "TV/x265"}
+    - {id: 4, cat: TV/SD, desc: "TV/Xvid"}
+    # Games
+    - {id: 74, cat: Console, desc: "Games"}
+    - {id: 2, cat: Console/Other, desc: "Games/Mixed"}
+    - {id: 47, cat: Console/Other, desc: "Games/Nintendo"}
+    - {id: 43, cat: PC/Games, desc: "Games/PC-ISO"}
+    - {id: 45, cat: PC/Games, desc: "Games/PC-Rip"}
+    - {id: 71, cat: Console/PS4, desc: "Games/Playstation"}
+    - {id: 50, cat: Console/Wii, desc: "Games/Wii"}
+    - {id: 44, cat: Console/XBox, desc: "Games/Xbox"}
+    # Music
+    - {id: 75, cat: Audio, desc: "Music"}
+    - {id: 3, cat: Audio/MP3, desc: "Music/Audio"}
+    - {id: 80, cat: Audio/Lossless, desc: "Music/Flac"}
+    - {id: 93, cat: Audio, desc: "Music/Packs"}
+    - {id: 37, cat: Audio/Video, desc: "Music/Video"}
+    - {id: 21, cat: Audio/Other, desc: "Podcast"}
+    # Other
+    - {id: 76, cat: Other, desc: "Miscellaneous"}
+    - {id: 60, cat: TV/Anime, desc: "Anime"}
+    - {id: 1, cat: PC/0day, desc: "Appz"}
+    - {id: 86, cat: PC/0day, desc: "Appz/Non-English"}
+    - {id: 64, cat: Audio/Audiobook, desc: "AudioBook"}
+    - {id: 35, cat: Books, desc: "Books"}
+    - {id: 102, cat: Books, desc: "Books/Non-English"}
+    - {id: 94, cat: Books/Comics, desc: "Comics"}
+    - {id: 95, cat: Books/Other, desc: "Educational"}
+    - {id: 98, cat: Other, desc: "Fonts"}
+    - {id: 69, cat: PC/Mac, desc: "Mac"}
+    - {id: 92, cat: Books/Mags, desc: "Magazines / Newspapers"}
+    - {id: 58, cat: PC/Mobile-Other, desc: "Mobile"}
+    - {id: 36, cat: Other, desc: "Pics/Wallpapers"}
+    # XXX
+    - {id: 88, cat: XXX, desc: "XXX"}
+    - {id: 85, cat: XXX/Other, desc: "XXX/Magazines"}
+    - {id: 8, cat: XXX, desc: "XXX/Movie"}
+    - {id: 81, cat: XXX, desc: "XXX/Movie/0Day"}
+    - {id: 91, cat: XXX/Pack, desc: "XXX/Packs"}
+    - {id: 84, cat: XXX/ImageSet, desc: "XXX/Pics/Wallpapers"}
+
+  modes:
+    search: [q]
+    tv-search: [q, season, ep, imdbid, genre]
+    movie-search: [q, imdbid, genre]
+    music-search: [q]
+    book-search: [q]
+  allowtvsearchimdb: true
+
+settings:
+  - name: cookie
+    type: text
+    label: Cookie
+  - name: useragent
+    type: text
+    label: User-Agent (must match your browser)
+  - name: info_setup
+    type: info
+    label: Setup Instructions
+    default: "In IPTorrents website Settings:<ul><li>Set <b>Torrents per page</b> to <b>100</b></li><li>Tick <b>Show files count</b></li><li>Set <b>Category column</b> to <b>Icons</b></li></ul>"
+  - name: sort
+    type: select
+    label: Sort requested from site
+    default: time
+    options:
+      time: created
+      size: size
+      seeders: seeders
+      name: title
+  - name: freeleech
+    type: checkbox
+    label: Search freeleech only
+    default: false
+
+login:
+  method: cookie
+  inputs:
+    cookie: "{{ .Config.cookie }}"
+  test:
+    path: t
+    selector: a[href="/lout.php"]
+
+search:
+  paths:
+    - path: t
+
+  inputs:
+    $raw: "{{ range .Categories }}{{ . }}=&{{ end }}"
+    q: "{{ if .Query.IMDBID }}+({{ .Query.IMDBID }}){{ else }}{{ if .Keywords }}+({{ .Keywords }}){{ end }}{{ end }}"
+    qf: "{{ if .Query.IMDBID }}all{{ else }}{{ end }}"
+    o: "{{ .Config.sort }}"
+    free: "{{ if .Config.freeleech }}on{{ else }}{{ end }}"
+
+  keywordsfilters:
+    - name: re_replace
+      args: ["\\s+", " "]
+
+  rows:
+    selector: "table#torrents > tbody > tr:has(a.hv)"
+
+  fields:
+    title:
+      selector: a.hv
+      filters:
+        - name: re_replace
+          args: ["[\\x00-\\x08\\x0A-\\x1F]", ""]
+        - name: re_replace
+          args: ["(?i)[\\(\\[\\{]REQ(UEST(ED)?)?[\\)\\]\\}]", ""]
+        - name: trim
+          args: " -:"
+    details:
+      selector: a.hv
+      attribute: href
+    download:
+      selector: "a[href^=\"/download.php/\"]"
+      attribute: href
+    _descr:
+      selector: div.sub
+    _datePart:
+      selector: div.sub
+      filters:
+        - name: split
+          args: ["|", -1]
+        - name: re_replace
+          args: ["\\s*by\\s+.*$", ""]
+        - name: trim
+    date:
+      text: "{{ .Result._datePart }}"
+      filters:
+        - name: fuzzytime
+    category:
+      selector: "td:nth-of-type(1) a[href^=\"?\"]"
+      attribute: href
+      filters:
+        - name: replace
+          args: ["?", ""]
+        - name: split
+          args: ["&", 0]
+    size:
+      selector: "td:nth-of-type(6)"
+    seeders:
+      selector: "td:nth-of-type(8)"
+    leechers:
+      selector: "td:nth-of-type(9)"
+    grabs:
+      selector: "td:nth-of-type(7)"
+    downloadvolumefactor:
+      selector: "span.free"
+      optional: true
+      case:
+        "": 1
+      default: 0
+    uploadvolumefactor:
+      text: 1
+    minimumratio:
+      text: 1
+    minimumseedtime:
+      # 14 days
+      text: 1209600
