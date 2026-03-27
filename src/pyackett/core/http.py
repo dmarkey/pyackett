@@ -272,11 +272,26 @@ class HttpClient:
 
         try:
             logger.debug(f"Launching Camoufox with proxy={proxy_config}")
-            async with AsyncCamoufox(
-                headless=True,
-                proxy=proxy_config,
-                geoip=True,
-            ) as browser:
+            # Redirect stdout to stderr during Camoufox — its package manager
+            # prints download progress to stdout which corrupts MCP stdio.
+            import contextlib, sys, io
+            @contextlib.contextmanager
+            def _suppress_stdout():
+                old = sys.stdout
+                sys.stdout = sys.stderr
+                try:
+                    yield
+                finally:
+                    sys.stdout = old
+
+            with _suppress_stdout():
+                browser_ctx = AsyncCamoufox(
+                    headless=True,
+                    proxy=proxy_config,
+                    geoip=True,
+                )
+                browser = await browser_ctx.__aenter__()
+            try:
                 page = await browser.new_page()
                 # Navigate to the actual URL to solve CF for that specific path.
                 # Some sites have different CF security per path.
@@ -348,6 +363,12 @@ class HttpClient:
 
                 logger.warning(f"Cloudflare challenge timed out for {domain}")
                 return False
+
+            finally:
+                try:
+                    await browser_ctx.__aexit__(None, None, None)
+                except Exception:
+                    pass
 
         except Exception as e:
             logger.error(f"Camoufox CF solver error for {domain}: {e}")
