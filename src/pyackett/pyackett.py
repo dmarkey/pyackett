@@ -158,6 +158,20 @@ class Pyackett:
 
         return await self._manager.search(tq, indexer_ids=indexer_ids)
 
+    async def resolve_download(self, indexer_id: str, details_url: str) -> str | None:
+        """Resolve a download link by visiting the details page.
+
+        For indexers like 1337x where the search result 'link' points to
+        a details page, this fetches the page and extracts the actual
+        .torrent URL or magnet URI using the definition's download selectors.
+
+        Returns a magnet URI, .torrent URL, or None.
+        """
+        indexer = self._manager.get_indexer(indexer_id)
+        if indexer and hasattr(indexer, 'resolve_download'):
+            return await indexer.resolve_download(details_url)
+        return None
+
     def search_sync(
         self,
         query: str | TorznabQuery,

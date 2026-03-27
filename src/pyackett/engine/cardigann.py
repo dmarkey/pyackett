@@ -546,6 +546,54 @@ class CardigannIndexer:
 
         return all_results
 
+    async def resolve_download(self, details_url: str) -> str | None:
+        """Resolve a download link by visiting the details page.
+
+        Uses the definition's `download.selectors` to find the actual
+        .torrent URL or magnet URI on the details page.
+
+        Returns a magnet URI, .torrent URL, or None if not found.
+        """
+        download_block = self.definition.download
+        if not download_block:
+            return None
+
+        selectors = download_block.get("selectors", [])
+        if not selectors:
+            return None
+
+        variables = self._build_variables(TorznabQuery())
+
+        try:
+            resp = await self._request(details_url)
+            if resp.status_code >= 400:
+                return None
+
+            doc = parse_html(resp.text)
+
+            for sel_block in selectors:
+                selector = sel_block.get("selector", "")
+                if not selector:
+                    continue
+                selector = apply_template(selector, variables)
+                attribute = sel_block.get("attribute", "href")
+
+                el = doc.select_one(selector)
+                if el:
+                    link = el.get(attribute, "")
+                    if link:
+                        # Apply filters if any
+                        filt = sel_block.get("filters")
+                        if filt:
+                            link = apply_filters(link, filt, variables)
+                        if not link.startswith("http") and not link.startswith("magnet:"):
+                            link = self.site_link.rstrip("/") + "/" + link.lstrip("/")
+                        return link
+        except Exception as e:
+            logger.error(f"Failed to resolve download from {details_url}: {e}")
+
+        return None
+
     def _parse_results(
         self, content: str, response_type: str, variables: dict[str, Any]
     ) -> list[ReleaseInfo]:
