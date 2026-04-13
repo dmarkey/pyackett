@@ -48,8 +48,21 @@ class HttpClient:
     """Async HTTP client with browser TLS fingerprinting and CF bypass.
 
     Uses curl_cffi to impersonate real browser TLS fingerprints.
-    Optionally uses nodriver to solve Cloudflare JS challenges.
+    Optionally uses Camoufox to solve Cloudflare JS challenges.
+    Includes intelligent retry logic with browser fallback.
     """
+
+    # Browser fallback chain for retry logic (max 3 browsers)
+    BROWSER_FALLBACK = ["chrome", "firefox", "edge"]
+
+    # Sites known to be offline or inaccessible (empty by default)
+    # Dynamically populated based on actual failures
+    BLACKLIST: set[str] = set()
+
+    # Per-site timeout configuration (for known slow sites)
+    SITE_TIMEOUTS = {
+        "magnetdl.com": 30,
+    }
 
     def __init__(
         self,
@@ -57,11 +70,13 @@ class HttpClient:
         timeout: float = 30.0,
         connect_timeout: float = 5.0,
         impersonate: str = DEFAULT_IMPERSONATE,
+        retry_with_browser: bool = True,
     ):
         self._proxy = proxy
         self._timeout = timeout
         self._connect_timeout = connect_timeout
         self._impersonate = impersonate
+        self._retry_with_browser = retry_with_browser
         self._session: AsyncSession | None = None
         self._cf_cache: dict[str, CfClearance] = {}
         self._cf_failed: set[str] = set()  # domains where CF solve failed this session
@@ -109,32 +124,93 @@ class HttpClient:
         follow_redirects: bool = True,
         cf_retry: bool = True,
     ) -> Response:
-        """GET request with automatic CF challenge retry."""
-        session = await self._get_session_for_domain(url)
-        merged = self._merge_cf_cookies(url, headers)
-        resp = await session.get(
-            url,
-            headers=merged,
-            params=params,
-            allow_redirects=follow_redirects,
-        )
-        if cf_retry and self._is_cf_challenge(resp) and self._should_try_cf(url):
-            solved = await self._solve_cf_challenge(url)
-            if solved:
-                session = await self._get_session_for_domain(url)
-                merged = self._merge_cf_cookies(url, headers)
-                # Always follow redirects on CF retry — the clearance flow may redirect
-                resp = await session.get(
-                    url,
-                    headers=merged,
-                    params=params,
-                    allow_redirects=True,
-                )
-                logger.debug(f"CF retry: {resp.status_code} len={len(resp.text)}")
-            else:
-                from urllib.parse import urlparse
-                self._cf_failed.add(urlparse(url).netloc)
-        return resp
+        """GET request with automatic CF challenge retry and browser fallback.
+
+        Args:
+            url: URL to fetch
+            headers: Optional headers to include
+            params: Optional query parameters
+            follow_redirects: Whether to follow redirects
+            cf_retry: Whether to retry on Cloudflare challenges
+
+        Returns:
+            Response object
+
+        Raises:
+            Exception: If URL is blacklisted or all retries fail
+        """
+        from urllib.parse import urlparse
+
+        domain = urlparse(url).netloc
+        timeout = self._get_timeout_for_domain(domain)
+
+        # Check blacklist first (fail fast for user-configured bad sites)
+        if domain in self.BLACKLIST:
+            logger.warning(f"Site {domain} is in blacklist - skipping")
+            raise Exception(f"Site {domain} is blacklisted by user configuration")
+
+        # Try with default browser first
+        try:
+            session = await self._get_session_for_domain(url)
+            merged = self._merge_cf_cookies(url, headers)
+            resp = await session.get(
+                url,
+                headers=merged,
+                params=params,
+                allow_redirects=follow_redirects,
+                timeout=(self._connect_timeout, timeout),
+            )
+
+            # Check for Cloudflare
+            if cf_retry and self._is_cf_challenge(resp) and self._should_try_cf(url):
+                solved = await self._solve_cf_challenge(url)
+                if solved:
+                    session = await self._get_session_for_domain(url)
+                    merged = self._merge_cf_cookies(url, headers)
+                    resp = await session.get(
+                        url,
+                        headers=merged,
+                        params=params,
+                        allow_redirects=True,
+                        timeout=(self._connect_timeout, timeout),
+                    )
+                    logger.debug(f"CF retry: {resp.status_code} len={len(resp.text)}")
+
+            # Success - return response
+            if resp.status_code < 500:
+                return resp
+
+            # Server error - try retry with different browser
+            if resp.status_code >= 500 and self._retry_with_browser:
+                logger.debug(f"Server error {resp.status_code} for {domain}, retrying with different browser")
+
+        except Exception as e:
+            error_str = str(e).lower()
+
+            # Classify error
+            is_timeout = "timeout" in error_str or "timed out" in error_str
+            is_dns = "could not resolve" in error_str or "hostname" in error_str or "dns" in error_str
+            is_connection = "connection" in error_str and not is_dns
+
+            # Don't retry DNS errors - site is likely offline
+            if is_dns:
+                logger.warning(f"DNS error for {domain} - site may be offline")
+                raise
+
+            # Log other errors
+            if is_timeout:
+                logger.debug(f"Timeout for {domain} (timeout={timeout}s)")
+            elif is_connection:
+                logger.debug(f"Connection error for {domain}")
+
+        # Retry with different browsers if enabled
+        if self._retry_with_browser:
+            return await self._retry_with_browsers(
+                url, headers, params, follow_redirects, cf_retry
+            )
+
+        # All retries failed - raise last exception or return last response
+        raise Exception(f"All retry attempts failed for {domain}")
 
     async def post(
         self,
@@ -232,6 +308,28 @@ class HttpClient:
             if "cloudflare" in body.lower():
                 return True
         return False
+
+    @staticmethod
+    def _has_torrent_content(resp: Response) -> bool:
+        """Check if response has actual torrent content (not just errors/minimal pages)."""
+        if resp.status_code != 200:
+            return False
+
+        text = resp.text or ""
+        if len(text) < 1000:
+            return False
+
+        # Not a Cloudflare challenge page
+        if HttpClient._is_cf_challenge(resp):
+            return False
+
+        # Look for torrent-related content indicators
+        content_indicators = [
+            'torrent', 'magnet', 'download', 'seed', 'leech',
+            'category', 'search', 'upload', 'size', 'files'
+        ]
+        text_lower = text.lower()
+        return sum(1 for ind in content_indicators if ind in text_lower) >= 2
 
     async def _solve_cf_challenge(self, url: str) -> bool:
         """Solve a Cloudflare challenge using Camoufox.
@@ -404,6 +502,82 @@ class HttpClient:
         except Exception as e:
             logger.warning(f"Failed to load CF cache: {e}")
 
+    async def _retry_with_browsers(
+        self,
+        url: str,
+        headers: dict[str, str] | None,
+        params: dict[str, str] | None,
+        follow_redirects: bool,
+        cf_retry: bool,
+    ) -> Response:
+        """Retry request with different browser fingerprints (max 3 attempts total)."""
+        from urllib.parse import urlparse
+
+        domain = urlparse(url).netloc
+        timeout = self._get_timeout_for_domain(domain)
+
+        attempts = 0
+        max_attempts = 3  # Limit to 3 total attempts (initial + 2 retries)
+
+        for browser in self.BROWSER_FALLBACK:
+            if browser == self._impersonate:
+                continue  # Already tried this one
+
+            if attempts >= max_attempts - 1:
+                break  # Already tried initial + max retries
+
+            attempts += 1
+            logger.debug(f"Retry {attempts}/{max_attempts-1} for {domain} with {browser}...")
+
+            try:
+                # Create session with different browser
+                async with AsyncSession(
+                    impersonate=browser,
+                    proxy=self._proxy,
+                    timeout=(self._connect_timeout, timeout),
+                    headers=DEFAULT_HEADERS,
+                ) as session:
+
+                    merged = self._merge_cf_cookies(url, headers)
+                    resp = await session.get(
+                        url,
+                        headers=merged,
+                        params=params,
+                        allow_redirects=follow_redirects,
+                    )
+
+                    # Check for CF
+                    if cf_retry and self._is_cf_challenge(resp) and self._should_try_cf(url):
+                        solved = await self._solve_cf_challenge(url)
+                        if solved:
+                            merged = self._merge_cf_cookies(url, headers)
+                            resp = await session.get(
+                                url,
+                                headers=merged,
+                                params=params,
+                                allow_redirects=True,
+                            )
+
+                    # Success!
+                    if resp.status_code < 500:
+                        logger.info(f"Successfully retried {domain} with {browser} (attempt {attempts})")
+                        return resp
+
+            except Exception as e:
+                logger.debug(f"Retry with {browser} failed: {str(e)[:60]}")
+                await asyncio.sleep(0.5)  # Brief pause between retries
+                continue
+
+        # All retries failed
+        raise Exception(f"All retry attempts failed for {domain} (tried {attempts} retries)")
+
+    def _get_timeout_for_domain(self, domain: str) -> float:
+        """Get timeout for specific domain."""
+        for site_domain, timeout in self.SITE_TIMEOUTS.items():
+            if site_domain in domain:
+                return timeout
+        return self._timeout
+
     async def close(self):
         """Close all sessions."""
         if self._session:
@@ -525,19 +699,38 @@ def create_http_client(
     proxy: str | None = None,
     timeout: float = 30.0,
     connect_timeout: float = 5.0,
+    retry_with_browser: bool = True,
 ) -> HttpClient:
-    """Create an HttpClient with optional proxy support.
+    """Create an HttpClient with optional proxy support and retry logic.
 
     Supports SOCKS5, SOCKS4, HTTP proxies natively via curl_cffi.
-    For SOCKS5 proxies, remote DNS resolution is used by default
-    (socks5h://) to avoid local DNS leaks.
+    Includes intelligent retry with browser fallback chain.
+
+    Proxy formats:
+    - HTTP: ``http://user:pass@host:port``
+    - SOCKS5: ``socks5://user:pass@host:port`` (auto-converted to socks5h://)
+    - SOCKS5 with remote DNS: ``socks5h://user:pass@host:port``
+
+    Note: ``socks5h://`` is recommended for SOCKS5 proxies because it uses
+    remote DNS resolution through the proxy, which avoids DNS leaks and
+    fixes "Could not resolve proxy" errors with some proxy providers.
 
     Args:
         proxy: Proxy URL string, or None for direct connection.
         timeout: Total request timeout in seconds.
         connect_timeout: TCP connection establishment timeout in seconds.
+        retry_with_browser: Enable retry with different browsers on failure.
+
+    Returns:
+        Configured HttpClient instance.
     """
-    # curl_cffi needs socks5h:// for remote DNS resolution
+    # Convert socks5:// to socks5h:// for remote DNS resolution through proxy
+    # This fixes DNS resolution issues with some SOCKS5 proxy providers
     if proxy and proxy.startswith("socks5://"):
         proxy = "socks5h://" + proxy[len("socks5://"):]
-    return HttpClient(proxy=proxy, timeout=timeout, connect_timeout=connect_timeout)
+    return HttpClient(
+        proxy=proxy,
+        timeout=timeout,
+        connect_timeout=connect_timeout,
+        retry_with_browser=retry_with_browser,
+    )

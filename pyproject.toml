@@ -1,6 +1,6 @@
 [project]
 name = "pyackett"
-version = "0.2.1"
+version = "0.3.0"
 description = "Python clean room implementation of a Torznab-compatible indexer proxy"
 readme = "README.md"
 requires-python = ">=3.12"
@@ -17,7 +17,7 @@ classifiers = [
 dependencies = [
     "fastapi>=0.115.0",
     "uvicorn[standard]>=0.32.0",
-    "curl_cffi>=0.7.0",
+    "curl_cffi>=0.15.0",
     "beautifulsoup4>=4.12.0",
     "lxml>=5.0.0",
     "pyyaml>=6.0",
