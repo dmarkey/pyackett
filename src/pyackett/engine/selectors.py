@@ -200,6 +200,11 @@ def parse_html(content: str) -> BeautifulSoup:
     return BeautifulSoup(content, "lxml")
 
 
+def parse_xml(content: str) -> BeautifulSoup:
+    """Parse XML content into a BeautifulSoup tree."""
+    return BeautifulSoup(content, "lxml-xml")
+
+
 def parse_json(content: str) -> Any:
     """Parse JSON content."""
     return json.loads(content)

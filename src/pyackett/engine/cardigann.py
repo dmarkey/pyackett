@@ -38,6 +38,7 @@ from pyackett.engine.selectors import (
     extract_text,
     parse_html,
     parse_json,
+    parse_xml,
     query_selector,
     query_selector_all,
 )
@@ -529,6 +530,10 @@ class CardigannIndexer:
                     response_type = "json"
                 elif resp.headers.get("content-type", "").startswith("application/json"):
                     response_type = "json"
+                elif response_block and response_block.get("type") == "xml":
+                    response_type = "xml"
+                elif resp.headers.get("content-type", "").startswith(("application/xml", "text/xml", "application/rss+xml")):
+                    response_type = "xml"
 
                 # Apply preprocessing filters
                 content = resp.text
@@ -611,8 +616,34 @@ class CardigannIndexer:
 
         if response_type == "json":
             return self._parse_json_results(content, row_selector, fields, variables, after)
+        elif response_type == "xml":
+            return self._parse_xml_results(content, row_selector, fields, variables, after)
         else:
             return self._parse_html_results(content, row_selector, fields, variables, after)
+
+    def _parse_xml_results(
+        self,
+        content: str,
+        row_selector: str,
+        fields: dict[str, Any],
+        variables: dict[str, Any],
+        after: int = 0,
+    ) -> list[ReleaseInfo]:
+        """Parse XML response into results."""
+        row_selector = apply_template(row_selector, variables)
+        doc = parse_xml(content)
+        rows = query_selector_all(doc, row_selector)
+
+        if after > 0:
+            rows = rows[after:]
+
+        results = []
+        for row in rows:
+            release = self._extract_release_from_html(row, fields, variables)
+            if release and release.title:
+                results.append(release)
+
+        return results
 
     def _parse_html_results(
         self,
