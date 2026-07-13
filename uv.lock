@@ -1168,7 +1168,7 @@ wheels = [
 
 [[package]]
 name = "pyackett"
-version = "0.3.1"
+version = "0.3.2"
 source = { editable = "." }
 dependencies = [
     { name = "beautifulsoup4" },
@@ -1186,11 +1186,13 @@ dependencies = [
 [package.optional-dependencies]
 cloudflare = [
     { name = "camoufox", extra = ["geoip"] },
+    { name = "playwright" },
 ]
 
 [package.dev-dependencies]
 dev = [
     { name = "camoufox", extra = ["geoip"] },
+    { name = "playwright" },
     { name = "pytest" },
     { name = "pytest-asyncio" },
 ]
@@ -1204,6 +1206,7 @@ requires-dist = [
     { name = "fastapi", specifier = ">=0.115.0" },
     { name = "jsonpath-ng", specifier = ">=1.6.0" },
     { name = "lxml", specifier = ">=5.0.0" },
+    { name = "playwright", marker = "extra == 'cloudflare'", specifier = ">=1.49,<1.61" },
     { name = "pydantic", specifier = ">=2.0.0" },
     { name = "python-dateutil", specifier = ">=2.9.0" },
     { name = "pyyaml", specifier = ">=6.0" },
@@ -1214,6 +1217,7 @@ provides-extras = ["cloudflare"]
 [package.metadata.requires-dev]
 dev = [
     { name = "camoufox", extras = ["geoip"], specifier = ">=0.4.11" },
+    { name = "playwright", specifier = ">=1.49,<1.61" },
     { name = "pytest", specifier = ">=8.0.0" },
     { name = "pytest-asyncio", specifier = ">=0.24.0" },
 ]

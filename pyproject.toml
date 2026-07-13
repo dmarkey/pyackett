@@ -1,6 +1,6 @@
 [project]
 name = "pyackett"
-version = "0.3.1"
+version = "0.3.2"
 description = "Python clean room implementation of a Torznab-compatible indexer proxy"
 readme = "README.md"
 requires-python = ">=3.12"
@@ -28,7 +28,9 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-cloudflare = ["camoufox[geoip]>=0.4.11"]
+# playwright 1.61+ sends viewport.isMobile in Browser.setDefaultViewport,
+# which Camoufox's patched Firefox (Juggler schema) rejects with a protocol error.
+cloudflare = ["camoufox[geoip]>=0.4.11", "playwright>=1.49,<1.61"]
 
 [project.urls]
 Homepage = "https://github.com/dmarkey/pyackett"
@@ -54,4 +56,5 @@ dev = [
     "pytest>=8.0.0",
     "pytest-asyncio>=0.24.0",
     "camoufox[geoip]>=0.4.11",
+    "playwright>=1.49,<1.61",
 ]
