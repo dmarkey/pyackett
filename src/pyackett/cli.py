@@ -61,7 +61,7 @@ def main():
         format="%(asctime)s [%(name)s] %(levelname)s: %(message)s",
     )
 
-    from pyackett import Pyackett
+    from pyackett import Pyackett, __version__
 
     pk = Pyackett(
         config_dir=args.config_dir,
@@ -87,7 +87,7 @@ def main():
             print("No local definitions found. Use --definitions-dir or --from-github jackett")
             sys.exit(1)
 
-    print(f"Pyackett v0.1.0")
+    print(f"Pyackett v{__version__}")
     print(f"Definitions: {len(pk.manager.definitions)} loaded")
     print(f"Configured: {len(pk.manager.configured_indexers)} indexers")
     print(f"Listening on http://{args.host}:{args.port}")

@@ -78,11 +78,31 @@ class HttpClient:
         self._impersonate = impersonate
         self._retry_with_browser = retry_with_browser
         self._session: AsyncSession | None = None
+        self._ff_session: AsyncSession | None = None
+        self._session_loop: asyncio.AbstractEventLoop | None = None
         self._cf_cache: dict[str, CfClearance] = {}
         self._cf_failed: set[str] = set()  # domains where CF solve failed this session
         self._cf_cache_path: Path | None = None  # set by Pyackett to enable persistence
 
+    def _reset_if_loop_changed(self) -> None:
+        """Drop cached sessions if the running event loop changed.
+
+        curl_cffi's AsyncSession binds to the loop it was first used on. The
+        sync wrappers (search_sync) run each call under a fresh asyncio.run
+        loop, so a session cached from a previous call would be bound to a
+        now-closed loop. Detect that and recreate lazily.
+        """
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return
+        if self._session_loop is not None and self._session_loop is not loop:
+            self._session = None
+            self._ff_session = None
+        self._session_loop = loop
+
     async def _ensure_session(self) -> AsyncSession:
+        self._reset_if_loop_changed()
         if self._session is None:
             self._session = AsyncSession(
                 impersonate=self._impersonate,
@@ -99,11 +119,12 @@ class HttpClient:
         Firefox — CF ties cf_clearance to the TLS fingerprint.
         """
         from urllib.parse import urlparse
+        self._reset_if_loop_changed()
         domain = urlparse(url).netloc
         cf = self._cf_cache.get(domain)
         if cf and cf.user_agent and "Firefox" in cf.user_agent:
             # Need a Firefox-impersonating session for this domain
-            if not hasattr(self, '_ff_session') or self._ff_session is None:
+            if self._ff_session is None:
                 self._ff_session = AsyncSession(
                     impersonate="firefox",
                     proxy=self._proxy,
@@ -175,6 +196,10 @@ class HttpClient:
                         timeout=(self._connect_timeout, timeout),
                     )
                     logger.debug(f"CF retry: {resp.status_code} len={len(resp.text)}")
+                else:
+                    # Remember the failure so we don't launch a headless browser
+                    # (~45s) on every subsequent request to this domain.
+                    self._cf_failed.add(domain)
 
             # Success - return response
             if resp.status_code < 500:
@@ -288,25 +313,41 @@ class HttpClient:
                 self._ff_session = None
         return True
 
+    # Markers unique to a Cloudflare interstitial/Turnstile challenge page.
+    # Deliberately specific: a bare "challenges.cloudflare.com" substring is
+    # NOT used because it also appears in ordinary page content, whereas the
+    # challenge-platform bootstrap tokens below only appear on the interstitial.
+    _CF_CHALLENGE_MARKERS = (
+        "window._cf_chl_opt",              # challenge platform bootstrap
+        "_cf_chl_opt",
+        "cf_chl_",
+        "cf-browser-verification",         # legacy JS challenge
+        "checking if the site connection is secure",
+        "just a moment...",                # CF interstitial <title>
+    )
+
     @staticmethod
     def _is_cf_challenge(resp: Response) -> bool:
-        """Detect Cloudflare challenge responses."""
-        if resp.status_code == 403:
-            ct = resp.headers.get("server", "")
-            if "cloudflare" in ct.lower():
-                return True
-            # Check body for CF challenge markers
-            body = resp.text[:2000] if resp.text else ""
-            if "cf-browser-verification" in body or "cf_clearance" in body:
-                return True
-            if "Checking if the site connection is secure" in body:
-                return True
-            if "challenges.cloudflare.com" in body:
-                return True
-        if resp.status_code == 503:
-            body = resp.text[:2000] if resp.text else ""
-            if "cloudflare" in body.lower():
-                return True
+        """Detect Cloudflare challenge responses.
+
+        Cloudflare serves challenges across several status codes: legacy JS
+        challenges use 403/503, but modern managed challenges and Turnstile
+        interstitials are commonly returned with HTTP 200. Detection therefore
+        keys off the challenge-platform markers/headers rather than status
+        alone (the old 403/503-only check missed every 200-status Turnstile).
+        """
+        # Definitive: Cloudflare sets this header on managed challenges.
+        if resp.headers.get("cf-mitigated", "").lower() == "challenge":
+            return True
+
+        body = resp.text[:8000] if resp.text else ""
+        lower = body.lower()
+        if any(marker in lower for marker in HttpClient._CF_CHALLENGE_MARKERS):
+            return True
+
+        # Server-error challenges fronted by Cloudflare.
+        if resp.status_code in (403, 503) and "cloudflare" in resp.headers.get("server", "").lower():
+            return True
         return False
 
     @staticmethod

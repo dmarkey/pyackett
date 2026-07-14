@@ -6,6 +6,7 @@ import base64
 import json
 import logging
 import secrets
+from dataclasses import replace as dataclass_replace
 from pathlib import Path
 from typing import Any
 
@@ -62,7 +63,9 @@ def create_app(
 
     cache = ResultCache()
 
-    app = FastAPI(title="Pyackett", version="0.1.0")
+    from pyackett import __version__ as _version
+
+    app = FastAPI(title="Pyackett", version=_version)
 
     # --- Torznab API ---
 
@@ -94,10 +97,19 @@ def create_app(
             return await _handle_search(indexer_id, params, request)
 
     def _rewrite_download_links(results, request: Request):
-        """Rewrite HTTP download links to go through our proxy endpoint."""
+        """Rewrite HTTP download links to go through our proxy endpoint.
+
+        Returns new ReleaseInfo copies rather than mutating the inputs, which
+        may be shared cache entries — mutating them in place caused links to be
+        wrapped again on every cache hit.
+        """
+        rewritten = []
         for r in results:
             if r.link and not r.link.startswith("magnet:"):
-                r.link = _proxy_link(request, r.link)
+                rewritten.append(dataclass_replace(r, link=_proxy_link(request, r.link)))
+            else:
+                rewritten.append(r)
+        return rewritten
 
     async def _handle_search(indexer_id: str, params: dict, request: Request) -> Response:
         indexer = manager.get_indexer(indexer_id)
@@ -136,7 +148,7 @@ def create_app(
         if query.limit > 0:
             results = results[:query.limit]
 
-        _rewrite_download_links(results, request)
+        results = _rewrite_download_links(results, request)
         xml = results_to_xml(
             results,
             channel_title=indexer.name,
@@ -162,7 +174,7 @@ def create_app(
         if query.limit > 0:
             results = results[:query.limit]
 
-        _rewrite_download_links(results, request)
+        results = _rewrite_download_links(results, request)
         xml = results_to_xml(
             results,
             channel_title="Pyackett",
@@ -218,7 +230,7 @@ def create_app(
         """Get server configuration."""
         return {
             "api_key": api_key,
-            "app_version": "0.1.0",
+            "app_version": _version,
             "configured_indexers": len(manager.configured_indexers),
             "total_definitions": len(manager.definitions),
         }
@@ -328,6 +340,9 @@ def create_app(
         """
         if not url or url.startswith("magnet:"):
             return url
+        # Idempotent: don't re-wrap a URL that already points at our proxy.
+        if "/api/v2.0/dl?url=" in url:
+            return url
         encoded = base64.urlsafe_b64encode(url.encode()).decode()
         return f"{request.base_url}api/v2.0/dl?url={encoded}&apikey={api_key}"
 
@@ -378,12 +393,12 @@ def create_app(
         index = web_dir / "index.html"
         if index.exists():
             return HTMLResponse(index.read_text())
-        return HTMLResponse(_MINIMAL_UI)
+        return HTMLResponse(_MINIMAL_UI.replace("__VERSION__", _version))
 
     @app.get("/UI/Dashboard", response_class=HTMLResponse)
     async def dashboard():
         """Redirect for Jackett-compatible UI path."""
-        return HTMLResponse(_MINIMAL_UI)
+        return HTMLResponse(_MINIMAL_UI.replace("__VERSION__", _version))
 
     return app
 
@@ -426,7 +441,7 @@ _MINIMAL_UI = """<!DOCTYPE html>
 
     <!-- Header -->
     <div class="d-flex justify-content-between align-items-center mb-3">
-        <h3 class="mb-0">Pyackett <small class="text-muted">v0.1.0</small></h3>
+        <h3 class="mb-0">Pyackett <small class="text-muted">v__VERSION__</small></h3>
         <button class="btn btn-success btn-sm" data-bs-toggle="modal" data-bs-target="#add-modal">+ Add Indexer</button>
     </div>
 

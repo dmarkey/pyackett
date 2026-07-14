@@ -5,6 +5,7 @@ from __future__ import annotations
 import io
 import json
 import logging
+import shutil
 import tarfile
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -170,20 +171,34 @@ def update_definitions(
     source: str = "jackett",
     branch: str = "master",
 ) -> Path:
-    """Force re-download definitions regardless of cache state."""
+    """Force re-download definitions regardless of cache state.
+
+    Downloads into a temporary directory and only swaps it in on success, so
+    a network failure leaves the existing definitions intact rather than
+    wiping them and ending up with zero indexers.
+    """
     repo, _ = _get_repo(source)
     defs_dir = config_dir / "definitions" / source
     marker_path = defs_dir / ".fetched"
-
-    if defs_dir.exists():
-        for f in defs_dir.glob("*.yml"):
-            f.unlink()
-        if marker_path.exists():
-            marker_path.unlink()
+    tmp_dir = defs_dir.parent / f".{source}.tmp"
 
     sha = _get_remote_sha(repo, branch)
-    count = fetch_definitions(defs_dir, source=source, branch=branch)
+
+    if tmp_dir.exists():
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+    try:
+        count = fetch_definitions(tmp_dir, source=source, branch=branch)
+    except Exception:
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+        raise  # keep the old definitions in place
+
     if count > 0:
         defs_dir.mkdir(parents=True, exist_ok=True)
+        for f in defs_dir.glob("*.yml"):
+            f.unlink()
+        for f in tmp_dir.glob("*.yml"):
+            shutil.move(str(f), str(defs_dir / f.name))
         _write_marker(marker_path, sha, count)
+
+    shutil.rmtree(tmp_dir, ignore_errors=True)
     return defs_dir

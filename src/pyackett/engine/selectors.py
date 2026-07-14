@@ -59,9 +59,20 @@ def query_selector_all(element: Tag, selector: str) -> list[Tag]:
     if not selector:
         return [element]
 
-    # Handle :root
+    # Handle :root — the remainder (e.g. ":root > channel > item") must still
+    # be applied, otherwise the whole document is returned as a single row.
     if selector.startswith(":root"):
-        return [element]
+        rest = selector[5:].strip()
+        if not rest:
+            return [element]
+        rest = rest.lstrip(">").strip() or rest
+        try:
+            results = element.select(rest)
+            if results:
+                return results
+        except Exception:
+            pass
+        return []
 
     try:
         results = element.select(selector)
@@ -146,6 +157,14 @@ def extract_from_json(data: Any, selector: str) -> Any:
     """
     if not selector:
         return data
+
+    # Leading dots (".field" / "..field") are Cardigann parent/self references.
+    # Rows built from a parent+child merge expose parent fields at top level, so
+    # strip the dots and resolve the remainder as a normal key/path.
+    if selector.startswith("."):
+        selector = selector.lstrip(".")
+        if not selector:
+            return data
 
     # Dollar sign = it's a JSONPath expression for a list of objects
     if selector == "$":

@@ -455,8 +455,13 @@ class TestParseXmlResults:
         assert results[1].link == "https://tracker.example.com/download/1002.torrent"
         assert results[1].size == 2048000000
 
-    def test_after_skips_rows(self):
-        """The 'after' parameter should skip the first N rows."""
+    def test_after_merges_rows(self):
+        """The 'after' parameter merges each result with the N rows that follow.
+
+        Jackett's ``rows.after: N`` treats every result as spanning N+1 sibling
+        rows, consuming rows in strides of N+1. With 3 <item> rows and after=1,
+        that yields two results whose primaries are the 1st and 3rd rows.
+        """
         search = {
             "rows": {"selector": "item", "after": 1},
             "fields": {
@@ -471,7 +476,7 @@ class TestParseXmlResults:
         results = indexer._parse_xml_results(RSS_FEED, "item", search["fields"], variables, after=1)
 
         assert len(results) == 2
-        assert results[0].title == "Fedora 40 Workstation x86_64"
+        assert results[0].title == "Ubuntu 24.04 LTS Desktop amd64"
         assert results[1].title == "Debian 12.5 netinst amd64"
 
     def test_empty_xml(self):

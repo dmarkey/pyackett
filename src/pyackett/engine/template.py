@@ -2,10 +2,16 @@
 
 Supports:
   - Variable interpolation: {{ .Config.username }}, {{ .Keywords }}
-  - Conditionals: {{ if .Var }}...{{ else }}...{{ end }}
+  - Conditionals: {{ if .Var }}...{{ else }}...{{ end }} including
+    {{ else if ... }} chains and arbitrary nesting
   - Range loops: {{ range .Categories }}{{ . }}{{ end }}
-  - Logic functions: and, or, eq, ne
+  - Logic functions: and, or, eq, ne, not (with nested parenthesised calls)
   - Built-in functions: re_replace, join
+
+The engine parses the template into a small node tree so that nested blocks
+pair correctly (a leftmost-first regex approach mis-pairs else/end across
+nesting levels). Logic functions are only evaluated inside {{ }} actions, so
+literal text such as "foo and .bar" is left untouched.
 """
 
 from __future__ import annotations
@@ -14,67 +20,188 @@ import re
 from collections.abc import Callable
 from typing import Any
 
-# Matches {{ range .Variable }}...{{ end }}
-_RANGE_RE = re.compile(
-    r"\{\{\s*range\s+(\.\w+(?:\.\w+)*)\s*\}\}(.*?)\{\{\s*end\s*\}\}",
-    re.DOTALL,
-)
+# Matches a whole {{ ... }} action, capturing optional Go whitespace-trim
+# markers ({{- / -}}).
+_ACTION_RE = re.compile(r"\{\{(-?)\s*(.*?)\s*(-?)\}\}", re.DOTALL)
 
-# Matches {{ re_replace .Variable "pattern" "replacement" }}
-_RE_REPLACE_RE = re.compile(
-    r"\{\{\s*re_replace\s+(\.\w+(?:\.\w+)*)\s+"
-    r'"(.*?)"\s+"(.*?)"\s*\}\}'
-)
+_LOGIC_FUNCS = {"and", "or", "eq", "ne", "not"}
+_NUMERIC_RE = re.compile(r"^-?\d+(?:\.\d+)?$")
 
-# Matches {{ join .Variable "separator" }}
-_JOIN_RE = re.compile(
-    r'\{\{\s*join\s+(\.\w+(?:\.\w+)*)\s+"(.*?)"\s*\}\}'
-)
 
-# Logic functions: and, or with 2+ variable/literal args
-_LOGIC_FUNCS = {"and", "or", "eq", "ne"}
-_LOGIC_RE = re.compile(
-    r'\b(and|or|eq|ne)((?:\s+(?:\(?\.[^\)\s]+\)?|"[^"]+"))+)'
-)
+# --------------------------------------------------------------------------
+# Tokenizer
+# --------------------------------------------------------------------------
 
-# if ... else ... end (non-greedy, innermost first)
-_IF_ELSE_RE = re.compile(
-    r"\{\{\s*if\s+(.+?)\s*\}\}(.*?)\{\{\s*else\s*\}\}(.*?)\{\{\s*end\s*\}\}",
-    re.DOTALL,
-)
 
-# if ... end (no else)
-_IF_RE = re.compile(
-    r"\{\{\s*if\s+(.+?)\s*\}\}(.*?)\{\{\s*end\s*\}\}",
-    re.DOTALL,
-)
+def _tokenize(template: str) -> list[tuple[str, str]]:
+    """Split a template into ('text', str) and ('action', str) tokens.
 
-# Simple variable: {{ .Foo.Bar }}
-_VAR_RE = re.compile(r"\{\{\s*(\.\w+(?:\.\w+)*)\s*\}\}")
+    Go whitespace trim markers ({{- and -}}) strip adjacent whitespace from
+    the neighbouring text token.
+    """
+    tokens: list[tuple[str, str]] = []
+    pos = 0
+    for m in _ACTION_RE.finditer(template):
+        if m.start() > pos:
+            tokens.append(("text", template[pos:m.start()]))
+        trim_left = m.group(1) == "-"
+        trim_right = m.group(3) == "-"
+        if trim_left and tokens and tokens[-1][0] == "text":
+            tokens[-1] = ("text", tokens[-1][1].rstrip())
+        tokens.append(("action", m.group(2).strip()))
+        pos = m.end()
+        if trim_right:
+            # Consume following whitespace in the source before the next token.
+            while pos < len(template) and template[pos].isspace():
+                pos += 1
+    if pos < len(template):
+        tokens.append(("text", template[pos:]))
+    return tokens
+
+
+# --------------------------------------------------------------------------
+# Parser -> node tree
+#   node := ("text", str)
+#         | ("action", str)
+#         | ("if", [(cond, [node...]), ...], else_nodes|None)
+#         | ("range", pipeline, [node...])
+# --------------------------------------------------------------------------
+
+
+def _parse_nodes(tokens: list[tuple[str, str]], i: int) -> tuple[list, int]:
+    """Parse nodes until a terminator action (end/else/else if) or EOF.
+
+    Returns (nodes, index_of_terminator_or_len).
+    """
+    nodes: list = []
+    while i < len(tokens):
+        kind, content = tokens[i]
+        if kind == "text":
+            nodes.append(("text", content))
+            i += 1
+            continue
+        # action
+        if content == "end" or content == "else" or content.startswith("else "):
+            return nodes, i  # leave terminator for the caller
+        if content == "if" or content.startswith("if "):
+            node, i = _parse_if(tokens, i)
+            nodes.append(node)
+        elif content == "range" or content.startswith("range "):
+            node, i = _parse_range(tokens, i)
+            nodes.append(node)
+        else:
+            nodes.append(("action", content))
+            i += 1
+    return nodes, i
+
+
+def _parse_if(tokens: list[tuple[str, str]], i: int) -> tuple[tuple, int]:
+    cond = tokens[i][1][2:].strip()  # strip leading "if"
+    i += 1
+    branches: list[tuple[str, list]] = []
+    else_nodes: list | None = None
+    while True:
+        body, i = _parse_nodes(tokens, i)
+        branches.append((cond, body))
+        if i >= len(tokens):
+            break  # unterminated; render what we have
+        term = tokens[i][1]
+        if term == "end":
+            i += 1
+            break
+        if term == "else":
+            i += 1
+            else_nodes, i = _parse_nodes(tokens, i)
+            if i < len(tokens) and tokens[i][1] == "end":
+                i += 1
+            break
+        if term.startswith("else if ") or term.startswith("elseif "):
+            cond = term.split("if", 1)[1].strip()
+            i += 1
+            continue
+        # Unexpected terminator (e.g. "else foo") — treat as end of block.
+        i += 1
+        break
+    return ("if", branches, else_nodes), i
+
+
+def _parse_range(tokens: list[tuple[str, str]], i: int) -> tuple[tuple, int]:
+    pipeline = tokens[i][1][5:].strip()  # strip leading "range"
+    i += 1
+    body, i = _parse_nodes(tokens, i)
+    if i < len(tokens) and tokens[i][1] == "end":
+        i += 1
+    return ("range", pipeline, body), i
+
+
+# --------------------------------------------------------------------------
+# Expression tokenizer / evaluator (conditions and function calls)
+# --------------------------------------------------------------------------
+
+
+def _tokenize_expr(s: str) -> list:
+    """Tokenize an expression into ('str', value), ('word', value), '(' and ')'."""
+    tokens: list = []
+    i = 0
+    n = len(s)
+    while i < n:
+        c = s[i]
+        if c.isspace():
+            i += 1
+            continue
+        if c in "()":
+            tokens.append(c)
+            i += 1
+            continue
+        if c in "\"'":
+            quote = c
+            j = i + 1
+            while j < n and s[j] != quote:
+                j += 1
+            tokens.append(("str", s[i + 1:j]))
+            i = j + 1
+            continue
+        j = i
+        while j < n and not s[j].isspace() and s[j] not in "()":
+            j += 1
+        tokens.append(("word", s[i:j]))
+        i = j
+    return tokens
+
+
+def _parse_expr(tokens: list, pos: int) -> tuple[list, int]:
+    """Parse a sequence of atoms up to ')' or end. Returns (atoms, pos)."""
+    atoms: list = []
+    while pos < len(tokens) and tokens[pos] != ")":
+        atom, pos = _parse_atom(tokens, pos)
+        atoms.append(atom)
+    return atoms, pos
+
+
+def _parse_atom(tokens: list, pos: int) -> tuple[Any, int]:
+    tok = tokens[pos]
+    if tok == "(":
+        atoms, pos = _parse_expr(tokens, pos + 1)
+        if pos < len(tokens) and tokens[pos] == ")":
+            pos += 1
+        return ("group", atoms), pos
+    return ("tok", tok), pos + 1
 
 
 def _resolve_var(name: str, variables: dict[str, Any]) -> Any:
-    """Resolve a dotted variable name against the variables dict.
-
-    Variables are stored flat with dotted keys like ".Config.username".
-    We try the full key first, then fall back to nested lookup.
-    """
-    # Direct lookup (most common case)
+    """Resolve a dotted variable name against the variables dict."""
     if name in variables:
         return variables[name]
 
-    # Try without leading dot
     no_dot = name.lstrip(".")
     prefixed = "." + no_dot
     if prefixed in variables:
         return variables[prefixed]
 
-    # Nested lookup: .Config.username -> look for "Config" dict, then "username"
     parts = no_dot.split(".")
     current: Any = variables
     for part in parts:
         if isinstance(current, dict):
-            # Try with and without dot prefix
             if part in current:
                 current = current[part]
             elif "." + part in current:
@@ -87,73 +214,184 @@ def _resolve_var(name: str, variables: dict[str, Any]) -> Any:
 
 
 def _is_truthy(value: Any) -> bool:
-    """Evaluate truthiness the Go template way."""
+    """Evaluate truthiness the Go template way (any non-empty string is true)."""
     if value is None:
         return False
-    if isinstance(value, str):
-        return bool(value.strip())
-    if isinstance(value, (list, tuple, dict)):
-        return len(value) > 0
     if isinstance(value, bool):
         return value
+    if isinstance(value, str):
+        return len(value) > 0
+    if isinstance(value, (list, tuple, dict)):
+        return len(value) > 0
     if isinstance(value, (int, float)):
         return value != 0
     return bool(value)
 
 
-def _extract_logic_args(args_str: str) -> list[str]:
-    """Extract arguments from a logic function match."""
-    args = []
-    # Match either "string literal" or (.varname) or .varname
-    for m in re.finditer(r'"([^"]+)"|(\(?\.[^\)\s]+\)?)', args_str):
-        if m.group(1) is not None:
-            args.append('"' + m.group(1) + '"')
-        else:
-            args.append(m.group(2).strip("()"))
-    return args
+def _eval_single(atom: Any, variables: dict[str, Any]) -> Any:
+    """Evaluate a single atom to a Python value."""
+    if atom[0] == "group":
+        return _eval_atoms(atom[1], variables)
+    tok = atom[1]
+    if isinstance(tok, tuple) and tok[0] == "str":
+        return tok[1]  # string literal
+    word = tok[1] if isinstance(tok, tuple) else tok
+    if word.startswith("."):
+        return _resolve_var(word, variables)
+    if word == "true":
+        return True
+    if word == "false":
+        return False
+    if _NUMERIC_RE.match(word):
+        return float(word) if "." in word else int(word)
+    return word  # bare word treated as literal
 
 
-def _eval_logic(func_name: str, args: list[str], variables: dict[str, Any]) -> str:
-    """Evaluate a logic function."""
-    if func_name == "and":
-        result = args[-1] if args else ""
-        for arg in args:
-            if arg.startswith('"'):
-                continue
-            val = _resolve_var(arg, variables)
-            if not _is_truthy(val):
-                result = arg
-                break
+def _values_equal(a: Any, b: Any) -> bool:
+    if isinstance(a, bool) or isinstance(b, bool):
+        return a == b
+    if isinstance(a, (int, float)) and isinstance(b, (int, float)):
+        return a == b
+    sa, sb = str(a), str(b)
+    if _NUMERIC_RE.match(sa) and _NUMERIC_RE.match(sb):
+        return float(sa) == float(sb)
+    return sa == sb
+
+
+def _apply_func(name: str, argvals: list[Any]) -> Any:
+    if name == "and":
+        result: Any = True
+        for v in argvals:
+            if not _is_truthy(v):
+                return v
+            result = v
         return result
-
-    if func_name == "or":
-        result = args[-1] if args else ""
-        for arg in args:
-            if arg.startswith('"'):
-                continue
-            val = _resolve_var(arg, variables)
-            if _is_truthy(val):
-                result = arg
-                break
+    if name == "or":
+        result = argvals[-1] if argvals else ""
+        for v in argvals:
+            if _is_truthy(v):
+                return v
         return result
-
-    if func_name in ("eq", "ne"):
-        if len(args) < 2:
-            return ".False"
-        vals = []
-        for arg in args[:2]:
-            if arg.startswith('"'):
-                vals.append(arg.strip('"'))
-            else:
-                v = _resolve_var(arg, variables)
-                vals.append(str(v) if v is not None else "")
-        is_equal = vals[0] == vals[1]
-        if func_name == "eq":
-            return ".True" if is_equal else ".False"
-        else:
-            return ".True" if not is_equal else ".False"
-
+    if name == "not":
+        return not _is_truthy(argvals[0]) if argvals else True
+    if name in ("eq", "ne"):
+        if len(argvals) < 2:
+            return False
+        equal = _values_equal(argvals[0], argvals[1])
+        return equal if name == "eq" else not equal
     return ""
+
+
+def _eval_atoms(atoms: list, variables: dict[str, Any]) -> Any:
+    """Evaluate a parsed atom list (a pipeline) to a value."""
+    if not atoms:
+        return ""
+    first = atoms[0]
+    if first[0] == "tok":
+        tok = first[1]
+        word = tok[1] if isinstance(tok, tuple) and tok[0] == "word" else None
+        if word in _LOGIC_FUNCS:
+            argvals = [_eval_single(a, variables) for a in atoms[1:]]
+            return _apply_func(word, argvals)
+    # Not a function call: the value is the first atom (extras ignored).
+    return _eval_single(first, variables)
+
+
+def _eval_condition(cond: str, variables: dict[str, Any]) -> bool:
+    tokens = _tokenize_expr(cond)
+    atoms, _ = _parse_expr(tokens, 0)
+    return _is_truthy(_eval_atoms(atoms, variables))
+
+
+# --------------------------------------------------------------------------
+# Rendering
+# --------------------------------------------------------------------------
+
+
+def _render_action(
+    expr: str, variables: dict[str, Any], modifier: Callable[[str], str] | None
+) -> str:
+    tokens = _tokenize_expr(expr)
+    atoms, _ = _parse_expr(tokens, 0)
+    if not atoms:
+        return ""
+
+    first = atoms[0]
+    head = None
+    if first[0] == "tok":
+        tok = first[1]
+        if isinstance(tok, tuple) and tok[0] == "word":
+            head = tok[1]
+
+    if head == "re_replace" and len(atoms) >= 4:
+        value = _eval_single(atoms[1], variables)
+        pattern = _eval_single(atoms[2], variables)
+        replacement = _eval_single(atoms[3], variables)
+        # Convert Go/.NET-style $1 backreferences to Python \1.
+        replacement = re.sub(r"\$(\d+)", r"\\\1", str(replacement))
+        try:
+            out = re.sub(str(pattern), replacement, str(value) if value is not None else "")
+        except re.error:
+            out = str(value) if value is not None else ""
+        return modifier(out) if modifier else out
+
+    if head == "join" and len(atoms) >= 3:
+        items = _eval_single(atoms[1], variables)
+        delimiter = str(_eval_single(atoms[2], variables))
+        if isinstance(items, (list, tuple)):
+            out = delimiter.join(str(x) for x in items)
+        else:
+            out = ""
+        return modifier(out) if modifier else out
+
+    if head in _LOGIC_FUNCS:
+        val = _eval_atoms(atoms, variables)
+        if isinstance(val, bool):
+            return "true" if val else ""
+        out = str(val) if val is not None else ""
+        return modifier(out) if modifier else out
+
+    # Plain variable (or dot in range bodies).
+    val = _eval_single(first, variables)
+    if val is None:
+        return ""
+    if isinstance(val, bool):
+        val = "true" if val else "false"
+    out = str(val)
+    return modifier(out) if modifier else out
+
+
+def _render(
+    nodes: list, variables: dict[str, Any], modifier: Callable[[str], str] | None
+) -> str:
+    out: list[str] = []
+    for node in nodes:
+        kind = node[0]
+        if kind == "text":
+            out.append(node[1])
+        elif kind == "action":
+            out.append(_render_action(node[1], variables, modifier))
+        elif kind == "if":
+            branches, else_nodes = node[1], node[2]
+            rendered = None
+            for cond, body in branches:
+                if _eval_condition(cond, variables):
+                    rendered = _render(body, variables, modifier)
+                    break
+            if rendered is None:
+                rendered = _render(else_nodes, variables, modifier) if else_nodes else ""
+            out.append(rendered)
+        elif kind == "range":
+            pipeline, body = node[1], node[2]
+            tokens = _tokenize_expr(pipeline)
+            atoms, _ = _parse_expr(tokens, 0)
+            items = _eval_atoms(atoms, variables)
+            if isinstance(items, (list, tuple)):
+                for item in items:
+                    item_vars = dict(variables)
+                    item_vars["."] = item
+                    out.append(_render(body, item_vars, modifier))
+    return "".join(out)
 
 
 def apply_template(
@@ -174,128 +412,6 @@ def apply_template(
     if not template or "{{" not in template:
         return template or ""
 
-    result = template
-
-    # 1. Range expressions: {{ range .Var }}...{{ . }}...{{ end }}
-    def _expand_range(m: re.Match) -> str:
-        var_name = m.group(1)
-        body = m.group(2)
-        items = _resolve_var(var_name, variables)
-        if not items or not isinstance(items, (list, tuple)):
-            return ""
-        parts = []
-        for item in items:
-            expanded = body.replace("{{ . }}", str(item)).replace("{{.}}", str(item))
-            parts.append(expanded)
-        return "".join(parts)
-
-    result = _RANGE_RE.sub(_expand_range, result)
-
-    # 2. re_replace: {{ re_replace .Var "pattern" "replacement" }}
-    def _expand_re_replace(m: re.Match) -> str:
-        var_name = m.group(1)
-        pattern = m.group(2)
-        replacement = m.group(3)
-        value = _resolve_var(var_name, variables)
-        value = str(value) if value is not None else ""
-        expanded = re.sub(pattern, replacement, value)
-        if modifier:
-            expanded = modifier(expanded)
-        return expanded
-
-    result = _RE_REPLACE_RE.sub(_expand_re_replace, result)
-
-    # 3. join: {{ join .Var "," }}
-    def _expand_join(m: re.Match) -> str:
-        var_name = m.group(1)
-        delimiter = m.group(2)
-        items = _resolve_var(var_name, variables)
-        if not items or not isinstance(items, (list, tuple)):
-            return ""
-        expanded = delimiter.join(str(i) for i in items)
-        if modifier:
-            expanded = modifier(expanded)
-        return expanded
-
-    result = _JOIN_RE.sub(_expand_join, result)
-
-    # 4. Logic functions (and, or, eq, ne) - process iteratively for nesting
-    max_iterations = 20
-    for _ in range(max_iterations):
-        m = _LOGIC_RE.search(result)
-        if not m:
-            break
-        func_name = m.group(1)
-        args_str = m.group(2)
-        args = _extract_logic_args(args_str)
-        func_result = _eval_logic(func_name, args, variables)
-        # For eq/ne with >2 args, only consume the first 2
-        if func_name in ("eq", "ne") and len(args) > 2:
-            # Recalculate the match end to only consume 2 args
-            consumed = result[m.start():m.end()]
-            # Find position after 2nd arg
-            arg_matches = list(re.finditer(r'"[^"]+"|(\(?\.[^\)\s]+\)?)', consumed))
-            if len(arg_matches) >= 3:  # func name is not in these matches
-                end_pos = m.start() + arg_matches[2].start()
-                result = result[:m.start()] + func_result + result[end_pos:]
-                continue
-        result = result[:m.start()] + func_result + result[m.end():]
-
-    # 5. if/else/end - process iteratively for nesting (innermost first)
-    for _ in range(max_iterations):
-        m = _IF_ELSE_RE.search(result)
-        if not m:
-            break
-        condition = m.group(1).strip()
-        on_true = m.group(2)
-        on_false = m.group(3)
-
-        if condition in (".True", "true", "True"):
-            chosen = on_true
-        elif condition in (".False", "false", "False", ""):
-            chosen = on_false
-        elif condition.startswith("."):
-            val = _resolve_var(condition, variables)
-            chosen = on_true if _is_truthy(val) else on_false
-        else:
-            # Could be a logic function result left as a variable ref
-            val = _resolve_var(condition, variables)
-            chosen = on_true if _is_truthy(val) else on_false
-
-        result = result[:m.start()] + chosen + result[m.end():]
-
-    # 5b. if/end (no else)
-    for _ in range(max_iterations):
-        m = _IF_RE.search(result)
-        if not m:
-            break
-        condition = m.group(1).strip()
-        body = m.group(2)
-
-        if condition in (".True", "true", "True"):
-            chosen = body
-        elif condition in (".False", "false", "False", ""):
-            chosen = ""
-        elif condition.startswith("."):
-            val = _resolve_var(condition, variables)
-            chosen = body if _is_truthy(val) else ""
-        else:
-            val = _resolve_var(condition, variables)
-            chosen = body if _is_truthy(val) else ""
-
-        result = result[:m.start()] + chosen + result[m.end():]
-
-    # 6. Simple variable substitution: {{ .Var }}
-    def _expand_var(m: re.Match) -> str:
-        var_name = m.group(1)
-        val = _resolve_var(var_name, variables)
-        if val is None:
-            return ""
-        expanded = str(val)
-        if modifier:
-            expanded = modifier(expanded)
-        return expanded
-
-    result = _VAR_RE.sub(_expand_var, result)
-
-    return result
+    tokens = _tokenize(template)
+    nodes, _ = _parse_nodes(tokens, 0)
+    return _render(nodes, variables, modifier)

@@ -1,6 +1,6 @@
 [project]
 name = "pyackett"
-version = "0.3.2"
+version = "0.4.0"
 description = "Python clean room implementation of a Torznab-compatible indexer proxy"
 readme = "README.md"
 requires-python = ">=3.12"

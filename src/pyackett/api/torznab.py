@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import re
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any
 from xml.etree.ElementTree import Element, SubElement, tostring
 
@@ -33,15 +33,26 @@ def _clean_xml(text: str | None) -> str:
 
 
 def _format_date(dt: datetime) -> str:
-    """Format datetime as RFC 822."""
-    return dt.strftime("%a, %d %b %Y %H:%M:%S %z") or dt.strftime("%a, %d %b %Y %H:%M:%S +0000")
+    """Format datetime as RFC 822 with a timezone.
+
+    Naive datetimes are assumed to be UTC so the output always carries a zone
+    offset (a bare "%z" on a naive datetime renders empty, which some RSS
+    consumers reject).
+    """
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.strftime("%a, %d %b %Y %H:%M:%S %z")
 
 
 def _torznab_attr(parent: Element, name: str, value: Any):
-    """Add a <torznab:attr name="..." value="..."/> element."""
-    if value is None:
+    """Add a <torznab:attr name="..." value="..."/> element.
+
+    Skips None and empty values so items don't carry a raft of empty
+    attributes (author="", infohash="", ...).
+    """
+    if value is None or value == "":
         return
-    el = SubElement(parent, f"{{{TORZNAB_NS}}}attr")
+    el = SubElement(parent, "torznab:attr")
     el.set("name", name)
     el.set("value", str(value))
 
@@ -60,7 +71,7 @@ def results_to_xml(
 
     channel = SubElement(rss, "channel")
 
-    atom_link = SubElement(channel, f"{{{ATOM_NS}}}link")
+    atom_link = SubElement(channel, "atom:link")
     atom_link.set("href", self_link or channel_link)
     atom_link.set("rel", "self")
     atom_link.set("type", "application/rss+xml")
@@ -96,19 +107,24 @@ def results_to_xml(
         if r.grabs is not None:
             SubElement(item, "grabs").text = str(r.grabs)
 
-        SubElement(item, "description").text = _clean_xml(r.description)
+        if r.description:
+            SubElement(item, "description").text = _clean_xml(r.description)
 
         link_url = r.link or r.magnet_uri or ""
-        SubElement(item, "link").text = link_url
+        if link_url:
+            SubElement(item, "link").text = link_url
 
         for cat_id in (r.category or []):
             SubElement(item, "category").text = str(cat_id)
 
-        enclosure = SubElement(item, "enclosure")
-        enclosure.set("url", link_url)
-        if r.size is not None:
-            enclosure.set("length", str(r.size))
-        enclosure.set("type", "application/x-bittorrent")
+        # Only emit an enclosure when there is a URL (RSS requires the
+        # enclosure url attribute to be a real link).
+        if link_url:
+            enclosure = SubElement(item, "enclosure")
+            enclosure.set("url", link_url)
+            if r.size is not None:
+                enclosure.set("length", str(r.size))
+            enclosure.set("type", "application/x-bittorrent")
 
         # Torznab attributes
         for cat_id in (r.category or []):
@@ -206,6 +222,20 @@ def caps_xml(
     return '<?xml version="1.0" encoding="UTF-8"?>\n' + xml_bytes
 
 
+def _safe_int_param(value: str | None, default: int, minimum: int | None = None) -> int:
+    """Parse an integer query param, falling back to default on bad input."""
+    if value is None or value == "":
+        result = default
+    else:
+        try:
+            result = int(value)
+        except (ValueError, TypeError):
+            result = default
+    if minimum is not None and result < minimum:
+        result = minimum
+    return result
+
+
 def parse_torznab_query(params: dict[str, str]) -> TorznabQuery:
     """Parse HTTP query parameters into a TorznabQuery."""
     query = TorznabQuery()
@@ -213,9 +243,9 @@ def parse_torznab_query(params: dict[str, str]) -> TorznabQuery:
     query.query_type = params.get("t", "search")
     query.api_key = params.get("apikey", "") or params.get("passkey", "")
     query.search_term = params.get("q") or params.get("Query")  # Jackett compat
-    query.extended = int(params.get("extended", "0") or "0")
-    query.limit = int(params.get("limit", "100") or "100")
-    query.offset = int(params.get("offset", "0") or "0")
+    query.extended = _safe_int_param(params.get("extended"), 0, minimum=0)
+    query.limit = _safe_int_param(params.get("limit"), 100, minimum=1)
+    query.offset = _safe_int_param(params.get("offset"), 0, minimum=0)
 
     # Categories (comma-separated, or Jackett-style Category[])
     cat_str = params.get("cat", "") or params.get("Category[]", "") or params.get("Category", "")

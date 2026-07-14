@@ -70,7 +70,10 @@ class ReleaseInfo:
 # Unicode dash characters (equivalent to \p{Pd})
 _STANDARDIZE_DASHES = re.compile(r"[\u002D\u058A\u05BE\u1400\u1806\u2010-\u2015\u2E17\u2E1A\u2E3A\u2E3B\u2E40\u301C\u3030\u30A0\uFE31\uFE32\uFE58\uFE63\uFF0D]+")
 _STANDARDIZE_QUOTES = re.compile(r"[\u0060\u00B4\u2018\u2019]")
-_SAFE_CHARS = set("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789 -._()@/'[]+%")
+# Punctuation/whitespace kept in addition to Unicode letters and digits.
+# Matches Jackett's SanitizedSearchTerm, which keeps IsLetterOrDigit plus a
+# small set of separators, so Cyrillic/CJK/accented queries survive.
+_SAFE_PUNCT = set(" -._()@/'[]+%")
 
 
 @dataclass
@@ -156,7 +159,7 @@ class TorznabQuery:
         term = self.search_term or ""
         term = _STANDARDIZE_DASHES.sub("-", term)
         term = _STANDARDIZE_QUOTES.sub("'", term)
-        return "".join(c for c in term if c in _SAFE_CHARS)
+        return "".join(c for c in term if c.isalnum() or c in _SAFE_PUNCT)
 
     def get_episode_search_string(self) -> str:
         if not self.season or self.season == 0:

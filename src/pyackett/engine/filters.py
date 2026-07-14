@@ -86,37 +86,72 @@ def _parse_fuzzy_time(data: str) -> datetime:
 
     # Try dateutil parser as fallback
     try:
-        return dateutil_parser.parse(data, fuzzy=True)
+        dt = dateutil_parser.parse(data, fuzzy=True)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt
     except (ValueError, OverflowError):
         return datetime.now(timezone.utc)
 
 
-def _parse_date_go_layout(data: str, layout: str) -> datetime:
-    """Parse date using Go-style layout format.
-
-    Go uses reference time: Mon Jan 2 15:04:05 MST 2006
-    We map common Go format tokens to Python strftime.
-    """
-    # Go -> Python strftime mapping
-    mapping = [
+# Cardigann/.NET-style layout tokens -> Python strftime directives.
+# Ordered so the scanner (longest-first) picks the widest token at each
+# position. strptime accepts unpadded values for %d/%m/%H/%M/%S, so single
+# and double tokens map to the same directive (never to invalid %-d).
+_LAYOUT_TOKENS: list[tuple[str, str]] = sorted(
+    [
         ("yyyy", "%Y"), ("yy", "%y"),
-        ("MMMM", "%B"), ("MMM", "%b"), ("MM", "%m"),
-        ("dd", "%d"), ("d", "%-d"),
-        ("HH", "%H"), ("hh", "%I"), ("mm", "%M"), ("ss", "%S"),
-        ("tt", "%p"), ("htt", "%I%p"),
-        ("zzz", "%z"),
+        ("MMMM", "%B"), ("MMM", "%b"), ("MM", "%m"), ("M", "%m"),
+        ("dddd", "%A"), ("ddd", "%a"), ("dd", "%d"), ("d", "%d"),
         ("EEEE", "%A"), ("EEE", "%a"),
-    ]
+        ("HH", "%H"), ("H", "%H"), ("hh", "%I"), ("h", "%I"),
+        ("mm", "%M"), ("m", "%M"), ("ss", "%S"), ("s", "%S"),
+        ("tt", "%p"), ("t", "%p"),
+        ("zzz", "%z"), ("zz", "%z"), ("z", "%z"),
+        ("K", "%z"),
+    ],
+    key=lambda t: -len(t[0]),
+)
 
-    py_format = layout
-    for go_tok, py_tok in mapping:
-        py_format = py_format.replace(go_tok, py_tok)
 
-    # Clean up the data
+def _go_layout_to_strftime(layout: str) -> str:
+    """Convert a Cardigann/.NET date layout to a strftime format in one pass.
+
+    A single left-to-right scan avoids the self-corruption that a sequence of
+    str.replace() calls causes (e.g. "dd" -> "%d" then the "d" rule rewriting
+    the "d" inside "%d"). Single-quoted sections are treated as literals.
+    """
+    out: list[str] = []
+    i = 0
+    n = len(layout)
+    while i < n:
+        if layout[i] == "'":
+            j = layout.find("'", i + 1)
+            if j != -1:
+                out.append(layout[i + 1:j])
+                i = j + 1
+                continue
+        for tok, repl in _LAYOUT_TOKENS:
+            if layout.startswith(tok, i):
+                out.append(repl)
+                i += len(tok)
+                break
+        else:
+            out.append("%%" if layout[i] == "%" else layout[i])
+            i += 1
+    return "".join(out)
+
+
+def _parse_date_go_layout(data: str, layout: str) -> datetime:
+    """Parse date using a Cardigann/.NET-style layout format."""
+    py_format = _go_layout_to_strftime(layout)
     data = data.strip()
 
     try:
-        return datetime.strptime(data, py_format)
+        dt = datetime.strptime(data, py_format)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt
     except ValueError:
         # Fallback to fuzzy parsing
         return _parse_fuzzy_time(data)
@@ -164,7 +199,17 @@ def apply_filters(
                 pattern = _fix_unicode_properties(str(args))
                 try:
                     m = re.search(pattern, data)
-                    data = m.group(1) if m and m.lastindex else ""
+                    if not m:
+                        data = ""
+                    elif m.groups():
+                        # First capturing group that actually participated
+                        # (with alternation, group 1 may be None).
+                        data = next(
+                            (g for g in m.groups() if g is not None), ""
+                        )
+                    else:
+                        # No capture groups: return the whole match.
+                        data = m.group(0)
                 except re.error:
                     pass
 

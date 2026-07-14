@@ -20,9 +20,10 @@ from typing import Any
 
 import hashlib
 import pickle
+from urllib.parse import urljoin, urlparse
 
 import yaml
-from bs4 import Tag
+from bs4 import BeautifulSoup, Tag
 
 from pyackett.core.categories import CATEGORIES, resolve_category
 from pyackett.core.models import (
@@ -45,6 +46,19 @@ from pyackett.engine.selectors import (
 from pyackett.engine.template import apply_template
 
 logger = logging.getLogger("pyackett.cardigann")
+
+try:
+    import soupsieve as _soupsieve
+
+    def _element_matches(element: Tag, selector: str) -> bool:
+        """Return True if the element itself matches the CSS selector."""
+        try:
+            return bool(_soupsieve.match(selector, element))
+        except Exception:
+            return False
+except Exception:  # pragma: no cover - soupsieve ships with bs4
+    def _element_matches(element: Tag, selector: str) -> bool:
+        return False
 
 def _parse_yaml(path: Path) -> dict:
     """Parse a YAML file using the fastest available loader."""
@@ -211,22 +225,100 @@ class CardigannIndexer:
                 self._default_categories.append(site_id)
 
     def _map_categories(self, torznab_cats: list[int]) -> list[str]:
-        """Map Torznab category IDs to site-specific category IDs."""
+        """Map Torznab category IDs to site-specific category IDs.
+
+        Matches Jackett: a requested category selects any tracker category
+        whose Torznab category is the requested one OR a child of it (when a
+        main category like 2000/Movies is requested), OR its parent (when a
+        subcategory is requested and only the parent is mapped).
+        """
         if not torznab_cats:
             return []
-        site_cats = set()
+        site_cats: set[str] = set()
         for cat in torznab_cats:
+            # Exact match
             if cat in self._torznab_to_site:
                 site_cats.update(self._torznab_to_site[cat])
-            # Also check parent category
-            parent = (cat // 1000) * 1000
-            if parent in self._torznab_to_site:
-                site_cats.update(self._torznab_to_site[parent])
-        return sorted(site_cats)
+            if cat % 1000 == 0:
+                # Main category requested -> include all mapped children.
+                for tc, sites in self._torznab_to_site.items():
+                    if (tc // 1000) * 1000 == cat:
+                        site_cats.update(sites)
+            else:
+                # Subcategory requested -> also include the parent mapping.
+                parent = (cat // 1000) * 1000
+                if parent in self._torznab_to_site:
+                    site_cats.update(self._torznab_to_site[parent])
+        return sorted(site_cats, key=lambda s: (0, int(s)) if s.isdigit() else (1, s))
 
     def _map_site_category(self, site_id: str) -> list[int]:
         """Map a site category ID to Torznab category IDs."""
         return self._site_to_torznab.get(str(site_id), [])
+
+    def _absolute_url(self, link: str, base: str | None = None) -> str:
+        """Resolve a possibly-relative link to an absolute URL.
+
+        Handles protocol-relative (//host/path), root-relative (/path) and
+        document-relative links, and leaves magnet: and absolute URLs intact.
+        """
+        if not link:
+            return link
+        if link.startswith("magnet:"):
+            return link
+        base = base or self.site_link
+        if not base:
+            return link
+        return urljoin(base, link)
+
+    @staticmethod
+    def _apply_case(element: Tag | None, case_map: dict[str, Any]) -> str | None:
+        """Resolve a Cardigann `case` block.
+
+        In Jackett, `case` keys are CSS selectors matched against the field's
+        selected element: a key matches when the element itself matches the
+        selector OR contains a descendant matching it. The keys ``""`` (empty
+        selector — matches whenever an element was selected) and ``"*"`` act as
+        the catch-all/default. Returns the mapped value of the first match.
+        """
+        for key, val in case_map.items():
+            if key == "*":
+                # Unconditional catch-all.
+                return str(val)
+            if key == "":
+                # Empty selector matches whenever an element was selected.
+                if element is not None:
+                    return str(val)
+                continue
+            if element is None:
+                continue
+            try:
+                if _element_matches(element, key) or element.select_one(key) is not None:
+                    return str(val)
+            except Exception:
+                continue
+        return None
+
+    @staticmethod
+    def _merge_after(rows: list[Tag], after: int, xml: bool = False) -> list[Tag]:
+        """Merge each result row with the `after` continuation rows that follow.
+
+        Jackett's `rows.after: N` means every result spans N+1 sibling rows
+        (e.g. two-line torrent tables). We group rows into strides of N+1 and
+        re-parse each group as one combined element so field selectors can
+        reach content in any of the merged rows.
+        """
+        if after <= 0:
+            return rows
+        parser = "lxml-xml" if xml else "html.parser"
+        step = after + 1
+        merged: list[Tag] = []
+        for i in range(0, len(rows), step):
+            chunk = rows[i:i + step]
+            if not chunk:
+                continue
+            combined = "".join(str(t) for t in chunk)
+            merged.append(BeautifulSoup(combined, parser))
+        return merged
 
     def _build_variables(self, query: TorznabQuery) -> dict[str, Any]:
         """Build the template variable dict for a search query."""
@@ -310,15 +402,18 @@ class CardigannIndexer:
         if ua:
             req_headers.setdefault("User-Agent", ua)
 
-        # Add search headers from definition
+        # Add search headers from definition as a fallback. Callers (search /
+        # login) pass headers already expanded with the real query variables,
+        # so use setdefault to avoid clobbering them with empty-query values.
         search_headers = self.definition.search.get("headers", {})
-        for key, values in search_headers.items():
-            if isinstance(values, list):
-                val = values[0] if values else ""
-            else:
-                val = str(values)
-            # Template-expand header values
-            req_headers[key] = apply_template(val, self._build_variables(TorznabQuery()))
+        if search_headers:
+            base_vars = self._build_variables(TorznabQuery())
+            for key, values in search_headers.items():
+                if isinstance(values, list):
+                    val = values[0] if values else ""
+                else:
+                    val = str(values)
+                req_headers.setdefault(key, apply_template(val, base_vars))
 
         if method.upper() == "POST":
             return await client.post(
@@ -370,45 +465,39 @@ class CardigannIndexer:
                 val = str(values)
             req_headers[key] = apply_template(val, variables)
 
+        # Expand the login inputs once (used by get/form/post methods).
+        login_inputs = {}
+        for key, value in login_block.get("inputs", {}).items():
+            login_inputs[key] = apply_template(str(value), variables)
+
+        resp = None
         try:
             if method == "get":
-                resp = await self._request(path, method="GET", headers=req_headers)
+                # GET login sends the inputs as query parameters.
+                resp = await self._request(
+                    path, method="GET",
+                    params=login_inputs or None, headers=req_headers,
+                )
             elif method == "header":
                 resp = await self._request(path, method="GET", headers=req_headers)
             elif method == "cookie":
-                # Cookie auth — either via named cookies or a full cookie string
+                # Cookie auth — either via named cookies or a full cookie string.
+                # Verification is handled by the unified test block below.
                 cookie_names = login_block.get("cookies", [])
                 if cookie_names:
                     for name in cookie_names:
                         if name in self.config:
                             self.cookies[name] = self.config[name]
-                # Also check inputs for a full cookie string
-                login_inputs = login_block.get("inputs", {})
                 for key, value in login_inputs.items():
-                    expanded = apply_template(str(value), variables)
-                    if expanded:
+                    if value:
                         # Parse "uid=123; pass=abc" into individual cookies
-                        for part in expanded.split(";"):
+                        for part in value.split(";"):
                             part = part.strip()
                             if "=" in part:
                                 k, v = part.split("=", 1)
                                 self.cookies[k.strip()] = v.strip()
-                # Test the login
-                test = login_block.get("test", {})
-                test_path = test.get("path", "")
-                if test_path:
-                    if not test_path.startswith("http"):
-                        test_path = self.site_link.rstrip("/") + "/" + test_path.lstrip("/")
-                    resp = await self._request(test_path)
-                else:
-                    self.is_configured = True
-                    return True
             elif method in ("form", "post"):
-                inputs = login_block.get("inputs", {})
-                form_data = {}
-                for key, value in inputs.items():
-                    form_data[key] = apply_template(str(value), variables)
-                resp = await self._request(path, method="POST", data=form_data, headers=req_headers)
+                resp = await self._request(path, method="POST", data=login_inputs, headers=req_headers)
             else:
                 logger.warning(f"Unknown login method: {method}")
                 self.is_configured = True
@@ -419,29 +508,66 @@ class CardigannIndexer:
                 for name, value in resp.cookies.items():
                     self.cookies[name] = value
 
-            # Check for errors
-            error_blocks = login_block.get("error", [])
-            if error_blocks and resp.text:
-                for err in error_blocks:
-                    err_sel = err.get("selector", "")
-                    if err_sel and ":root:contains(" in err_sel:
-                        check_text = err_sel.split(":contains(")[1].rstrip(")")
-                        check_text = check_text.strip("'\"")
-                        if check_text.lower() in resp.text.lower():
-                            msg = err.get("message", {})
-                            if isinstance(msg, dict):
-                                msg_text = apply_template(msg.get("text", "Login failed"), variables)
-                            else:
-                                msg_text = "Login failed"
-                            logger.error(f"Login error for {self.id}: {msg_text}")
-                            return False
-
-            if resp.status_code < 400:
-                self.is_configured = True
-                return True
-            else:
+            if resp is not None and resp.status_code >= 400:
                 logger.error(f"Login failed for {self.id}: HTTP {resp.status_code}")
                 return False
+
+            # Check for login errors declared in the definition.
+            error_blocks = login_block.get("error", [])
+            resp_text = resp.text if resp is not None and hasattr(resp, "text") else ""
+            if error_blocks and resp_text:
+                doc = parse_html(resp_text)
+                for err in error_blocks:
+                    err_sel = err.get("selector", "")
+                    if not err_sel:
+                        continue
+                    matched = False
+                    if ":root:contains(" in err_sel or ":contains(" in err_sel:
+                        check_text = err_sel.split(":contains(")[1].rstrip(")")
+                        check_text = check_text.strip("'\"")
+                        matched = check_text.lower() in resp_text.lower()
+                    else:
+                        matched = query_selector(doc, err_sel) is not None
+                    if matched:
+                        msg = err.get("message", {})
+                        if isinstance(msg, dict):
+                            msg_text = apply_template(msg.get("text", "Login failed"), variables)
+                        else:
+                            msg_text = "Login failed"
+                        logger.error(f"Login error for {self.id}: {msg_text}")
+                        return False
+
+            # Verify the login actually worked via the test block, if declared.
+            test = login_block.get("test", {})
+            if test:
+                test_sel = test.get("selector", "")
+                test_path = test.get("path", "")
+                test_text = resp_text
+                if test_path:
+                    test_path = self._absolute_url(apply_template(test_path, variables))
+                    try:
+                        test_resp = await self._request(test_path)
+                        if test_resp is not None and hasattr(test_resp, "text"):
+                            test_text = test_resp.text
+                            if test_resp.status_code >= 400:
+                                logger.error(
+                                    f"Login test failed for {self.id}: "
+                                    f"HTTP {test_resp.status_code}"
+                                )
+                                return False
+                    except Exception as e:
+                        logger.warning(f"Login test request failed for {self.id}: {e}")
+                if test_sel and test_text:
+                    test_sel = apply_template(test_sel, variables)
+                    if query_selector(parse_html(test_text), test_sel) is None:
+                        logger.error(
+                            f"Login test failed for {self.id}: "
+                            f"test selector not found (not logged in)"
+                        )
+                        return False
+
+            self.is_configured = True
+            return True
 
         except Exception as e:
             logger.error(f"Login error for {self.id}: {e}")
@@ -591,9 +717,7 @@ class CardigannIndexer:
                         filt = sel_block.get("filters")
                         if filt:
                             link = apply_filters(link, filt, variables)
-                        if not link.startswith("http") and not link.startswith("magnet:"):
-                            link = self.site_link.rstrip("/") + "/" + link.lstrip("/")
-                        return link
+                        return self._absolute_url(link)
         except Exception as e:
             logger.error(f"Failed to resolve download from {details_url}: {e}")
 
@@ -615,7 +739,10 @@ class CardigannIndexer:
         after = rows_block.get("after", 0)
 
         if response_type == "json":
-            return self._parse_json_results(content, row_selector, fields, variables, after)
+            return self._parse_json_results(
+                content, row_selector, fields, variables, after,
+                row_attribute=rows_block.get("attribute"),
+            )
         elif response_type == "xml":
             return self._parse_xml_results(content, row_selector, fields, variables, after)
         else:
@@ -633,13 +760,15 @@ class CardigannIndexer:
         row_selector = apply_template(row_selector, variables)
         doc = parse_xml(content)
         rows = query_selector_all(doc, row_selector)
-
-        if after > 0:
-            rows = rows[after:]
+        rows = self._merge_after(rows, after, xml=True)
 
         results = []
         for row in rows:
-            release = self._extract_release_from_html(row, fields, variables)
+            try:
+                release = self._extract_release_from_html(row, fields, variables)
+            except Exception as e:
+                logger.debug(f"Skipping row for {self.id}: {e}")
+                continue
             if release and release.title:
                 results.append(release)
 
@@ -657,13 +786,15 @@ class CardigannIndexer:
         row_selector = apply_template(row_selector, variables)
         doc = parse_html(content)
         rows = query_selector_all(doc, row_selector)
-
-        if after > 0:
-            rows = rows[after:]
+        rows = self._merge_after(rows, after, xml=False)
 
         results = []
         for row in rows:
-            release = self._extract_release_from_html(row, fields, variables)
+            try:
+                release = self._extract_release_from_html(row, fields, variables)
+            except Exception as e:
+                logger.debug(f"Skipping row for {self.id}: {e}")
+                continue
             if release and release.title:
                 results.append(release)
 
@@ -676,6 +807,7 @@ class CardigannIndexer:
         fields: dict[str, Any],
         variables: dict[str, Any],
         after: int = 0,
+        row_attribute: str | None = None,
     ) -> list[ReleaseInfo]:
         """Parse JSON response into results."""
         try:
@@ -687,12 +819,36 @@ class CardigannIndexer:
         row_selector = apply_template(row_selector, variables)
         rows = extract_rows_from_json(data, row_selector)
 
+        # rows.attribute: each selected object carries a child array (e.g. a
+        # movie with a `torrents` list). Expand into one row per child, merged
+        # with the parent so `..parentField` selectors still resolve.
+        if row_attribute:
+            expanded: list[dict] = []
+            for parent in rows:
+                if not isinstance(parent, dict):
+                    continue
+                children = parent.get(row_attribute)
+                if isinstance(children, list):
+                    for child in children:
+                        if isinstance(child, dict):
+                            expanded.append({**parent, **child})
+                        else:
+                            expanded.append({**parent, row_attribute: child})
+                elif children is not None:
+                    expanded.append({**parent, row_attribute: children})
+                # Missing attribute -> no rows for this parent
+            rows = expanded
+
         if after > 0:
             rows = rows[after:]
 
         results = []
         for row in rows:
-            release = self._extract_release_from_json(row, fields, variables)
+            try:
+                release = self._extract_release_from_json(row, fields, variables)
+            except Exception as e:
+                logger.debug(f"Skipping row for {self.id}: {e}")
+                continue
             if release and release.title:
                 results.append(release)
 
@@ -718,16 +874,29 @@ class CardigannIndexer:
                 value = apply_template(str(text_template), row_variables)
             else:
                 value = extract_text(row, field_block)
+            if not isinstance(value, str):
+                value = str(value)
+            # A `default`/extracted value may itself be a template referencing
+            # earlier fields (e.g. default: "{{ .Result.title_default }}").
+            if "{{" in value:
+                value = apply_template(value, row_variables)
 
             # Apply filters
             filt = field_block.get("filters")
             if filt:
                 value = apply_filters(value, filt, row_variables)
 
-            # Apply case mapping
+            # Apply case mapping (keys are CSS selectors matched against the
+            # field's element, with "*" as the wildcard).
             case_map = field_block.get("case")
-            if case_map and isinstance(case_map, dict):
-                value = case_map.get(value, case_map.get(value.strip(), value))
+            if isinstance(case_map, dict):
+                sel = field_block.get("selector", "")
+                target = query_selector(row, sel) if sel else row
+                mapped = self._apply_case(target, case_map)
+                if mapped is None:
+                    default = field_block.get("default")
+                    mapped = str(default) if default is not None else value
+                value = mapped
 
             field_values[field_name] = value
             row_variables[f".Result.{field_name}"] = value
@@ -754,14 +923,24 @@ class CardigannIndexer:
                 selector = field_block.get("selector", "")
                 raw_value = extract_from_json(row, selector)
                 value = str(raw_value) if raw_value is not None else field_block.get("default", "")
+            if not isinstance(value, str):
+                value = str(value)
+            if "{{" in value:
+                value = apply_template(value, row_variables)
 
             filt = field_block.get("filters")
             if filt:
                 value = apply_filters(value, filt, row_variables)
 
+            # JSON case maps use value equality (no CSS selectors); coerce
+            # keys/values to str so integer YAML values don't crash.
             case_map = field_block.get("case")
-            if case_map and isinstance(case_map, dict):
-                value = case_map.get(value, case_map.get(value.strip(), value))
+            if isinstance(case_map, dict):
+                str_map = {str(k): str(v) for k, v in case_map.items()}
+                if value in str_map:
+                    value = str_map[value]
+                elif "*" in str_map:
+                    value = str_map["*"]
 
             field_values[field_name] = value
             row_variables[f".Result.{field_name}"] = value
@@ -782,18 +961,16 @@ class CardigannIndexer:
         )
 
         # Details / comments URL
-        details = fields.get("details", "")
+        details = fields.get("details") or fields.get("comments", "")
         if details:
-            if not details.startswith("http"):
-                details = self.site_link.rstrip("/") + "/" + details.lstrip("/")
+            details = self._absolute_url(details)
             release.details = details
             release.guid = details
 
         # Download link
         download = fields.get("download", "")
         if download:
-            if not download.startswith("http") and not download.startswith("magnet:"):
-                download = self.site_link.rstrip("/") + "/" + download.lstrip("/")
+            download = self._absolute_url(download)
             if download.startswith("magnet:"):
                 release.magnet_uri = download
             else:
@@ -848,11 +1025,16 @@ class CardigannIndexer:
         else:
             release.publish_date = datetime.now(timezone.utc)
 
-        # Category
+        # Category — map the row's site category, falling back to the
+        # definition's default-flagged categories when none is present.
         cat_str = fields.get("category", "")
         if cat_str:
-            torznab_cats = self._map_site_category(cat_str)
-            release.category = torznab_cats
+            release.category = self._map_site_category(cat_str)
+        if not release.category and self._default_categories:
+            default_cats: set[int] = set()
+            for site_id in self._default_categories:
+                default_cats.update(self._map_site_category(site_id))
+            release.category = sorted(default_cats)
 
         # Grabs / Files
         release.grabs = _safe_int(fields.get("grabs"))
@@ -888,9 +1070,7 @@ class CardigannIndexer:
         # Poster
         poster = fields.get("poster", "")
         if poster:
-            if not poster.startswith("http"):
-                poster = self.site_link.rstrip("/") + "/" + poster.lstrip("/")
-            release.poster = poster
+            release.poster = self._absolute_url(poster)
 
         # Media-specific fields
         release.author = fields.get("author") or None
@@ -922,18 +1102,40 @@ class CardigannIndexer:
             "mb": 1024**2, "mib": 1024**2,
             "gb": 1024**3, "gib": 1024**3,
             "tb": 1024**4, "tib": 1024**4,
+            "pb": 1024**5, "pib": 1024**5,
         }
 
         m = re.match(r"([\d.,]+)\s*([a-zA-Z]+)", size_str)
         if m:
             try:
-                num = float(m.group(1).replace(",", ""))
+                num = float(_normalize_decimal(m.group(1)))
                 unit = m.group(2).lower()
                 mult = multipliers.get(unit, 1)
                 return int(num * mult)
             except ValueError:
                 pass
         return None
+
+
+def _normalize_decimal(num_str: str) -> str:
+    """Normalize a numeric string that may use ',' or '.' as separators.
+
+    Handles both US ("1,024.5") and European ("1.024,5" / "1,5") conventions
+    by treating the rightmost of the two separators as the decimal point.
+    """
+    num_str = num_str.strip()
+    if "," in num_str and "." in num_str:
+        if num_str.rfind(",") > num_str.rfind("."):
+            # European: '.' thousands, ',' decimal
+            return num_str.replace(".", "").replace(",", ".")
+        return num_str.replace(",", "")  # US: ',' thousands
+    if "," in num_str:
+        parts = num_str.split(",")
+        # A single comma followed by other-than-3 digits is a decimal comma.
+        if len(parts) == 2 and len(parts[1]) != 3:
+            return num_str.replace(",", ".")
+        return num_str.replace(",", "")
+    return num_str
 
 
 def _safe_int(value: str | None) -> int | None:
